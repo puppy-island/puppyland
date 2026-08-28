@@ -8,6 +8,80 @@
   'use strict';
 
   /* ────────────────────────────────────────────────────────────────────
+     0. 品种图谱 + 颜色滤镜（对应参考项目 breeds.ts / overlays.ts）
+     ──────────────────────────────────────────────────────────────────── */
+  var BREEDS = {
+    '柯基':       { name: '柯基犬',       image: 'assets/breeds/柯基犬.png' },
+    '中华田园犬': { name: '中华田园犬',   image: 'assets/breeds/中华田园犬.png' },
+    '柴犬':       { name: '柴犬',         image: 'assets/breeds/柴犬.png' },
+    '哈士奇':     { name: '哈士奇',       image: 'assets/breeds/哈士奇.png' },
+    '金毛':       { name: '金毛寻回犬',   image: 'assets/breeds/金毛.png' },
+    '拉布拉多':   { name: '拉布拉多寻回犬', image: 'assets/breeds/拉布拉多.png' },
+    '泰迪':       { name: '贵宾犬',       image: 'assets/breeds/泰迪.png' },
+    '法斗':       { name: '法国斗牛犬',   image: 'assets/breeds/法斗.png' },
+    '小白狗':     { name: '小白狗',       image: 'assets/breeds/小白狗.png' }
+  };
+  var BREED_ALIASES = [
+    ['柯基','威尔士柯基','柯基犬','welsh corgi'],
+    ['中华田园犬','土狗','田园犬','小土狗','黄白小土狗','柴狗'],
+    ['柴犬','shiba inu','shiba'],
+    ['哈士奇','西伯利亚雪橇犬','husky','二哈'],
+    ['金毛','金毛寻回犬','golden retriever'],
+    ['拉布拉多','拉布拉多寻回犬','labrador'],
+    ['泰迪','贵宾犬','贵宾','toy poodle','poodle'],
+    ['法斗','法国斗牛犬','french bulldog'],
+    ['小白狗','小白','小白犬']
+  ];
+  var COLOR_FILTERS = {
+    'white': 'grayscale(100%) brightness(1.1)',
+    'cream': 'sepia(0.3) saturate(0.8) brightness(1.05)',
+    'light-brown': 'sepia(0.5) saturate(1.2)',
+    'dark-brown': 'sepia(0.7) saturate(1.3) brightness(0.9)',
+    'black': 'grayscale(100%) brightness(0.3) contrast(1.2)',
+    'gray': 'grayscale(100%) brightness(0.7)'
+  };
+
+  function findBreed(text) {
+    if (!text) return null;
+    var t = text.toLowerCase();
+    for (var key in BREEDS) {
+      if (t.indexOf(key) >= 0) return { key: key, breed: BREEDS[key] };
+    }
+    for (var i = 0; i < BREED_ALIASES.length; i++) {
+      var aliases = BREED_ALIASES[i];
+      for (var j = 0; j < aliases.length; j++) {
+        if (t.indexOf(aliases[j]) >= 0) {
+          var k = Object.keys(BREEDS)[i] || key;
+          return { key: k, breed: BREEDS[k] };
+        }
+      }
+    }
+    return null;
+  }
+
+  function findColor(text) {
+    if (!text) return null;
+    var t = text.toLowerCase();
+    if (/白|白的/.test(t)) return 'white';
+    if (/奶油|奶油色/.test(t)) return 'cream';
+    if (/浅棕|淡棕/.test(t)) return 'light-brown';
+    if (/深棕|黑棕/.test(t)) return 'dark-brown';
+    if (/黑色|黑的/.test(t)) return 'black';
+    if (/灰色|灰的/.test(t)) return 'gray';
+    return null;
+  }
+
+  function applyBreedImage(imgEl, breedKey, colorKey) {
+    if (!imgEl) return;
+    if (breedKey && BREEDS[breedKey]) {
+      imgEl.src = BREEDS[breedKey].image;
+    }
+    if (colorKey && COLOR_FILTERS[colorKey]) {
+      imgEl.style.filter = COLOR_FILTERS[colorKey];
+    }
+  }
+
+  /* ────────────────────────────────────────────────────────────────────
      0. API 配置与工具
      ──────────────────────────────────────────────────────────────────── */
   var API_BASE = 'http://localhost:8001/api/v1';
@@ -44,9 +118,9 @@
   }
 
   // 创建后端 Pet 档案
-  function createPet(name, avatarUrl) {
-    var data = { name: name, avatar_url: avatarUrl || null };
-    fetch(API_BASE + '/pets', {
+  function createPet(name, avatarUrl, breed, color) {
+    var data = { name: name, avatar_url: avatarUrl || null, breed: breed || null, color: color || null };
+    return fetch(API_BASE + '/pets', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data)
@@ -58,8 +132,9 @@
         S.backendPetId = pet.id;
         save();
       }
+      return pet;
     })
-    .catch(function(){});
+    .catch(function(){ return null; });
   }
 
   // 同步记忆到后端
@@ -141,7 +216,7 @@
     memories: [],                   // MemoryItem
     pawMarks: [],                   // PawMark
     profile: {                      // CharacterProfile（安全、可 grounding 的部分）
-      place: '', traits: [], objects: [], habits: [], precious: ''
+      place: '', traits: [], objects: [], habits: [], precious: '', breed: '', color: ''
     },
     story: {                        // StoryState：唯一活跃的想象性剧情
       scene: 'home', beat: 0, petState: 'idle', used: [], mood: '灯还亮着'
@@ -479,13 +554,21 @@
         placeholder: '写下 TA 的名字',
         skip: '还不想说',
         onSkip: function () { a.innerHTML = ''; askPhoto(); },
-        onDone: function (v) {
+        onDone: async function (v) {
           S.petName = v.slice(0, 12);
           addMemory('s1', '名字：' + S.petName, 3);
           litTrail($('#trail1'), 1);
           bumpDetail(0.12);
-          // 创建后端 Pet 档案
-          if (!currentPetId) createPet(S.petName, null);
+          var detectedBreed = findBreed(v);
+          var detectedColor = findColor(v);
+          if (detectedBreed) S.profile.breed = detectedBreed.key;
+          if (detectedColor) S.profile.color = detectedColor;
+          save();
+          await createPet(S.petName, null, detectedBreed ? detectedBreed.key : null, detectedColor);
+          syncMeetingStory('用户名为：' + S.petName + '的宠物的相遇故事');
+          // 应用品种图到所有宠物形象
+          var breedKey = detectedBreed ? detectedBreed.key : null;
+          $$('.pet').forEach(function(img){ applyBreedImage(img, breedKey, detectedColor); });
           say(n, '「<em>' + S.petName + '</em>」。这个名字在屋子里亮了一下。').then(askPhoto);
         }
       });
@@ -535,7 +618,7 @@
           onDone: function (v) {
             var m = addMemory('s1', v, 2);
             addPaw('s1', '第一次见面', m.id);
-            syncMeetingStory(v);  // 同步相遇故事到后端
+            syncMeetingStory(v);
             worldPatch1();
           }
         });
@@ -1015,11 +1098,6 @@
 
   var resumed = load();
   setDetail(S.detail);
-
-  // 无历史记录时，初始化后端测试数据（3条记忆）
-  if (!resumed) {
-    setTimeout(initTestData, 500);
-  }
 
   goto(resumed && S.scene === 'companion' ? 'companion' : 'intro');
 })();
