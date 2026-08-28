@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>记忆家园 Memory Home</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500&family=Noto+Serif+SC:wght@300;400;500&family=Nunito:wght@400;600&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<svg class="svg-defs" aria-hidden="true" focusable="false">
+  <symbol id="paw" viewBox="0 0 26 26">
+    <ellipse cx="6.2" cy="9.4" rx="2.7" ry="3.5" transform="rotate(-20 6.2 9.4)"/>
+    <ellipse cx="11.6" cy="6.4" rx="2.8" ry="3.7"/>
+    <ellipse cx="17.2" cy="7.0" rx="2.8" ry="3.7" transform="rotate(14 17.2 7)"/>
+    <ellipse cx="21.6" cy="11.6" rx="2.5" ry="3.2" transform="rotate(30 21.6 11.6)"/>
+    <path d="M13.6 12.4c4.3 0 7.3 2.6 7.3 5.8 0 3-2.6 4.6-5.2 4.6-1.5 0-2.2-.5-3.3-.5-1.1 0-1.8.5-3.3.5-2.6 0-5.2-1.6-5.2-4.6 0-3.2 3-5.8 7.3-5.8Z"/>
+  </symbol>
+  <symbol id="play" viewBox="0 0 24 24"><path d="M9 6.6c0-.9 1-1.4 1.7-.9l7.2 4.9a1.1 1.1 0 0 1 0 1.8l-7.2 4.9c-.7.5-1.7 0-1.7-.9V6.6Z"/></symbol>
+  <symbol id="send" viewBox="0 0 24 24"><path d="M4.3 11.2 18.6 5.1c.9-.4 1.8.5 1.4 1.4l-6.1 14.3c-.4 1-1.8.9-2.1-.1l-1.6-5.3-5.3-1.6c-1-.3-1.1-1.7-.1-2.1Z"/></symbol>
+  <symbol id="camera" viewBox="0 0 24 24"><path d="M9.2 4.5h5.6l1.1 2h2.6a2 2 0 0 1 2 2v8.8a2 2 0 0 1-2 2H5.5a2 2 0 0 1-2-2V8.5a2 2 0 0 1 2-2h2.6l1.1-2Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><circle cx="12" cy="12.8" r="3.4" fill="none" stroke="currentColor" stroke-width="1.6"/></symbol>
+</svg>
+
+<div id="app">
+  <div class="stage" id="stage">
+    <div class="grain" aria-hidden="true"></div>
+    <div class="vignette" aria-hidden="true"></div>
+
+    <!-- ── 场景 0：开场 ─────────────────────────────── -->
+    <section class="scene" data-scene="intro" aria-label="开场">
+      <div class="world intro-world">
+        <div class="intro-fragments" aria-hidden="true">
+          <span class="frag frag-ball"></span>
+          <span class="frag frag-bowl"></span>
+          <span class="frag frag-collar"></span>
+        </div>
+        <div class="intro-paws" id="introPaws" aria-hidden="true"></div>
+        <div class="door" aria-hidden="true">
+          <div class="door-frame"></div>
+          <div class="door-light"></div>
+          <div class="door-panel"></div>
+        </div>
+      </div>
+      <div class="dock intro-dock">
+        <p class="narration serif" id="introLine"></p>
+        <button class="ghost-btn" id="introEnter" type="button" hidden>推开门</button>
+      </div>
+      <button class="skip" id="skipIntro" type="button">跳过</button>
+    </section>
+
+    <!-- ── 场景 1：门口第一次相遇 ────────────────────── -->
+    <section class="scene" data-scene="s1" aria-label="第一次相遇">
+      <div class="world room" id="room1">
+        <div class="light-shaft" aria-hidden="true"></div>
+        <div class="obj obj-window is-off" data-obj="window" aria-hidden="true"><i></i></div>
+        <div class="obj obj-table is-off" data-obj="table" aria-hidden="true"><b></b><u></u><u class="r"></u></div>
+        <div class="obj obj-box is-off" data-obj="box" aria-hidden="true"></div>
+        <div class="pet-slot" id="pet1">
+          <img class="pet" src="assets/pet-idle.webp" alt="一只轮廓还很模糊的小狗">
+        </div>
+        <div class="trail" id="trail1" aria-hidden="true"></div>
+      </div>
+      <div class="dock">
+        <p class="narration serif" id="n1"></p>
+        <div class="slot" id="a1"></div>
+      </div>
+    </section>
+
+    <!-- ── 场景 2：普通的一天 ───────────────────────── -->
+    <section class="scene" data-scene="s2" aria-label="普通的一天">
+      <div class="world room daylight" id="room2">
+        <div class="sky" aria-hidden="true"></div>
+        <div class="light-shaft warm" aria-hidden="true"></div>
+        <div class="obj obj-window" data-touch="window" role="button" tabindex="0" aria-label="窗边的阳光"><i></i></div>
+        <div class="obj obj-bowl" data-touch="bowl" role="button" tabindex="0" aria-label="饭盆"><span class="ripple"></span></div>
+        <div class="obj obj-keys" data-touch="keys" role="button" tabindex="0" aria-label="门口的钥匙"><b></b><em></em><em class="k2"></em></div>
+        <div class="obj obj-sofa" data-touch="sofa" role="button" tabindex="0" aria-label="沙发"><b></b><u></u></div>
+        <div class="obj obj-leash" data-touch="leash" role="button" tabindex="0" aria-label="牵引绳"><u></u><b></b><i></i></div>
+        <div class="obj obj-bed" data-touch="bed" role="button" tabindex="0" aria-label="床边的位置"><b></b></div>
+        <div class="pet-slot" id="pet2"><img class="pet" src="assets/pet-idle.webp" alt="小狗"></div>
+        <div class="trail" id="trail2" aria-hidden="true"></div>
+        <div class="touch-hint" id="touchHint">碰一碰亮起来的东西</div>
+      </div>
+      <div class="dock">
+        <p class="narration serif" id="n2"></p>
+        <div class="slot" id="a2"></div>
+      </div>
+    </section>
+
+    <!-- ── 场景 3：留下最不想失去的记忆 ──────────────── -->
+    <section class="scene" data-scene="s3" aria-label="留下最不想失去的记忆">
+      <div class="world night" id="room3">
+        <div class="moon" aria-hidden="true"></div>
+        <div class="paw-field" id="pawField"></div>
+        <div class="pet-slot" id="pet3"><img class="pet" src="assets/pet-down.webp" alt="小狗趴着"></div>
+      </div>
+      <div class="dock">
+        <p class="narration serif" id="n3"></p>
+        <div class="slot" id="a3"></div>
+      </div>
+    </section>
+
+    <!-- ── 家园生成 ─────────────────────────────────── -->
+    <section class="scene" data-scene="weave" aria-label="家园正在成形">
+      <div class="world weave-world">
+        <svg class="house-draw" viewBox="0 0 300 320" aria-hidden="true">
+          <path id="houseOutline" d="M40 300V128L150 34l110 94v172H40Z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
+        </svg>
+        <div class="weave-paws" id="weavePaws" aria-hidden="true"></div>
+      </div>
+      <div class="dock">
+        <p class="narration serif" id="nWeave"></p>
+      </div>
+    </section>
+
+    <!-- ── Companion ────────────────────────────────── -->
+    <section class="scene companion" data-scene="companion" aria-label="家园">
+      <header class="c-head">
+        <span class="c-name" id="cName">家</span>
+        <span class="c-sub" id="cSub">灯还亮着</span>
+      </header>
+      <div class="house-stage" id="houseStage">
+        <div class="house">
+          <div class="lamp" aria-hidden="true"><i></i><b></b><em></em></div>
+          <div class="h-obj h-window" data-safe="window" aria-hidden="true"><i></i></div>
+          <div class="h-obj h-mailbox" data-safe="mailbox" aria-hidden="true"><b></b><u></u></div>
+          <div class="h-obj h-bowl" data-safe="bowl" aria-hidden="true"></div>
+          <div class="h-obj h-ball" data-safe="ball" aria-hidden="true"></div>
+          <div class="pet-slot companion-pet" id="petC"><img class="pet" src="assets/pet-idle.webp" alt="小狗在家里"></div>
+        </div>
+      </div>
+      <div class="thread" id="thread" role="log" aria-live="polite"></div>
+      <form class="composer" id="composer" autocomplete="off">
+        <input class="c-input" id="cInput" type="text" placeholder="说点什么…" aria-label="说点什么">
+        <button class="icon-btn continue" id="btnContinue" type="button" aria-label="继续，让故事往下走">
+          <svg viewBox="0 0 24 24"><use href="#play"></use></svg>
+        </button>
+        <button class="icon-btn send" id="btnSend" type="submit" aria-label="发送">
+          <svg viewBox="0 0 24 24"><use href="#send"></use></svg>
+        </button>
+      </form>
+    </section>
+
+    <!-- 通用：语音录制浮层 -->
+    <div class="rec-overlay" id="recOverlay" hidden>
+      <div class="rec-card">
+        <div class="wave" id="wave" aria-hidden="true"></div>
+        <p class="rec-tip" id="recTip">松开结束</p>
+      </div>
+    </div>
+  </div>
+
+  <p class="stage-note">键盘 <kbd>1</kbd>–<kbd>5</kbd> 可跳场景 · <kbd>R</kbd> 重来</p>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

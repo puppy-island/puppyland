@@ -1,0 +1,9 @@
+# macOS
+.DS_Store
+
+# 大体积设计素材（不入库，走网盘/Figma）
+狗狗生成/
+*.pdf
+
+# 构建产物：由 prototype/build.py 生成
+prototype/dist/
