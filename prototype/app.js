@@ -1,10 +1,126 @@
 /* ==========================================================================
    记忆家园 Memory Home — 前端原型逻辑
    对应 PRD v2.1：场景驱动采集 → 后台记忆整理 → 唯一 Companion 叙事陪伴
-   全部 AI / ASR 均为 Mock，可离线完成演示。
+
+   后端接入：保留 localStorage 离线优先，异步同步到 FastAPI 后端。
    ========================================================================== */
 (function () {
   'use strict';
+
+  /* ────────────────────────────────────────────────────────────────────
+     0. API 配置与工具
+     ──────────────────────────────────────────────────────────────────── */
+  var API_BASE = 'http://localhost:8001/api/v1';
+  var currentPetId = null;  // 后端 Pet ID
+
+  // 异步 POST，不阻塞 UI，失败静默（离线优先）
+  function apiPost(endpoint, data) {
+    if (!currentPetId && endpoint.indexOf('pets') === -1) return;
+    var url = API_BASE + endpoint.replace('{pet_id}', currentPetId);
+    fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    }).catch(function(){}); // 离线时静默失败
+  }
+
+  // 异步 GET
+  function apiGet(endpoint) {
+    return fetch(API_BASE + endpoint.replace('{pet_id}', currentPetId))
+      .then(function(r){ return r.json(); })
+      .catch(function(){});
+  }
+
+  // 上传图片到后端
+  function uploadImage(file) {
+    return new Promise(function(resolve) {
+      var formData = new FormData();
+      formData.append('file', file);
+      fetch(API_BASE + '/upload-image', { method: 'POST', body: formData })
+        .then(function(r){ return r.json(); })
+        .then(function(data){ resolve(data.url || null); })
+        .catch(function(){ resolve(null); });
+    });
+  }
+
+  // 创建后端 Pet 档案
+  function createPet(name, avatarUrl) {
+    var data = { name: name, avatar_url: avatarUrl || null };
+    fetch(API_BASE + '/pets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(pet){
+      if (pet && pet.id) {
+        currentPetId = pet.id;
+        S.backendPetId = pet.id;
+        save();
+      }
+    })
+    .catch(function(){});
+  }
+
+  // 同步记忆到后端
+  function syncMemory(sceneId, text, priority, mediaUrl) {
+    if (!currentPetId) return;
+    var memoryTypes = ['first_sight','funny_eating','departure_reaction','protection','protected_by_owner','wonderful_moment'];
+    var type = sceneId === 's1' ? 'first_sight' : sceneId === 's2' ? 'funny_eating' : 'wonderful_moment';
+    apiPost('/pets/{pet_id}/memories', {
+      memory_type: type,
+      title: text.slice(0, 20),
+      content: text,
+      media_url: mediaUrl || null,
+      priority: priority || 1
+    });
+  }
+
+  // 同步相遇故事
+  function syncMeetingStory(text) {
+    if (!currentPetId) return;
+    apiPost('/pets/{pet_id}/meeting-story', { story: text });
+  }
+
+  // 初始化后端数据（3条测试记忆）
+  function initTestData() {
+    if (currentPetId) return;
+    // 先创建 Pet
+    fetch(API_BASE + '/pets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: '年糕', breed: '柯基', color: '黄白' })
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(pet){
+      if (!pet || !pet.id) return;
+      currentPetId = pet.id;
+      S.backendPetId = pet.id;
+      save();
+
+      // 添加3条测试记忆
+      var memories = [
+        { memory_type: 'first_sight', title: '第一次见面', content: '是在楼下的纸箱里捡到的，那天下着雨，它一直躲着不出来，特别胆小。' },
+        { memory_type: 'funny_eating', title: '吃饭的习惯', content: '吃饭之前一定要转两圈，特别贪吃。每次听到狗粮袋子的声音就兴奋得不行。' },
+        { memory_type: 'wonderful_moment', title: '等你回家', content: '它每天都会在门口等我，看到我回来就摇尾巴，什么都没有说，就一直摇。' }
+      ];
+      memories.forEach(function(m) {
+        fetch(API_BASE + '/pets/' + pet.id + '/memories', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(m)
+        }).catch(function(){});
+      });
+
+      // 相遇故事
+      fetch(API_BASE + '/pets/' + pet.id + '/meeting-story', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ story: '是在楼下的纸箱里捡到的，那天下着雨，它一直躲着不出来，特别胆小。' })
+      }).catch(function(){});
+    })
+    .catch(function(){});
+  }
 
   var $ = function (s, r) { return (r || document).querySelector(s); };
   var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
@@ -29,7 +145,8 @@
     },
     story: {                        // StoryState：唯一活跃的想象性剧情
       scene: 'home', beat: 0, petState: 'idle', used: [], mood: '灯还亮着'
-    }
+    },
+    backendPetId: null              // 后端 Pet ID
   };
 
   function save() {
@@ -42,6 +159,7 @@
       var d = JSON.parse(raw);
       if (!d || !d.story) return false;
       Object.assign(S, d);
+      currentPetId = S.backendPetId || null;
       return true;
     } catch (e) { return false; }
   }
@@ -100,6 +218,8 @@
     if (!sensitive) interpret(text);
     bumpDetail(0.16);
     save();
+    // 异步同步到后端
+    syncMemory(sceneId, text, priority, null);
     return m;
   }
 
@@ -364,6 +484,8 @@
           addMemory('s1', '名字：' + S.petName, 3);
           litTrail($('#trail1'), 1);
           bumpDetail(0.12);
+          // 创建后端 Pet 档案
+          if (!currentPetId) createPet(S.petName, null);
           say(n, '「<em>' + S.petName + '</em>」。这个名字在屋子里亮了一下。').then(askPhoto);
         }
       });
@@ -391,6 +513,8 @@
         inp.addEventListener('change', function () {
           if (!inp.files || !inp.files[0]) return;
           S.hasPhoto = true; bumpDetail(0.2); save();
+          // 上传到后端
+          uploadImage(inp.files[0]);
           a.innerHTML = '';
           askMeet('<span class="dim">照片收下了。毛色和耳朵慢慢对上了。</span>');
         });
@@ -411,6 +535,7 @@
           onDone: function (v) {
             var m = addMemory('s1', v, 2);
             addPaw('s1', '第一次见面', m.id);
+            syncMeetingStory(v);  // 同步相遇故事到后端
             worldPatch1();
           }
         });
@@ -790,17 +915,45 @@
     }
 
     interpret(text);
-    var t3 = typing(); await sleep(850); t3.remove();
+
+    // 调用后端 LLM 生成回复
+    var t3 = typing();
+    var llmReply = null;
+    if (currentPetId) {
+      try {
+        var res = await fetch(API_BASE + '/pets/' + currentPetId + '/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text })
+        });
+        if (res.ok) {
+          var data = await res.json();
+          llmReply = data.content;
+        }
+      } catch(e) {}
+    }
+    t3.remove();
+
     var b3 = document.createElement('div'); b3.className = 'beat'; thread.appendChild(b3);
-    var reacts = [
-      { act: N() + '抬头看着你，尾巴在地板上扫了两下。', say: '好呀。你说什么我都听。' },
-      { act: N() + '往你这边挪了挪，整个身子贴上来。', say: '我在听，你继续说。' },
-      { act: N() + '把爪子搭在你腿上，眼睛一直没离开。', say: '嗯，然后呢？' }
-    ];
-    var r = pick(reacts);
-    b3.appendChild(line('line-act', r.act));
-    await sleep(650);
-    b3.appendChild(line('line-say', r.say));
+    if (llmReply) {
+      // LLM 返回的回复（已包含动作/对白混合，需要解析）
+      // 尝试解析：如果是纯对白，加上默认动作描述
+      var isPetAction = /^[汪呜摇尾舔趴躺跑跳]|^[它TA]/.test(llmReply);
+      b3.appendChild(line('line-act', N() + '看着你，耳朵轻轻动了一下。'));
+      await sleep(600);
+      b3.appendChild(line('line-say', llmReply));
+    } else {
+      // 回退到 Mock
+      var reacts = [
+        { act: N() + '抬头看着你，尾巴在地板上扫了两下。', say: '好呀。你说什么我都听。' },
+        { act: N() + '往你这边挪了挪，整个身子贴上来。', say: '我在听，你继续说。' },
+        { act: N() + '把爪子搭在你腿上，眼睛一直没离开。', say: '嗯，然后呢？' }
+      ];
+      var r = pick(reacts);
+      b3.appendChild(line('line-act', r.act));
+      await sleep(650);
+      b3.appendChild(line('line-say', r.say));
+    }
     scrollEnd();
     busy = false; save();
     setTimeout(function () { if (!busy) playBeat(nextBeat()); }, 1400);
@@ -858,9 +1011,15 @@
     if (e.key === 'r' || e.key === 'R') reset();
   });
 
-  window.__mh = { S: S, goto: goto, reset: reset, addMemory: addMemory, addPaw: addPaw };  // 调试用
+  window.__mh = { S: S, goto: goto, reset: reset, addMemory: addMemory, addPaw: addPaw, createPet: createPet, initTestData: initTestData };  // 调试用
 
   var resumed = load();
   setDetail(S.detail);
+
+  // 无历史记录时，初始化后端测试数据（3条记忆）
+  if (!resumed) {
+    setTimeout(initTestData, 500);
+  }
+
   goto(resumed && S.scene === 'companion' ? 'companion' : 'intro');
 })();
