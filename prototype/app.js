@@ -22,14 +22,27 @@
     petName: '',
     hasPhoto: false,
     detail: 0,                      // 形象清晰度 0–1，信息不足即保持低细节 Base 形象
+    journey: {
+      stage: 'PET_CREATION',
+      sceneIndex: 0,
+      currentMemoryIndex: 0,
+      petCompletion: 0.25,
+      worldLevel: 0,
+      homeConfig: null,
+      memories: [],
+      voiceDescription: '',
+      petImage: 'assets/pet-idle.webp'
+    },
     memories: [],                   // MemoryItem
     pawMarks: [],                   // PawMark
     profile: {                      // CharacterProfile（安全、可 grounding 的部分）
       place: '', traits: [], objects: [], habits: [], precious: ''
     },
     story: {                        // StoryState：唯一活跃的想象性剧情
-      scene: 'home', beat: 0, petState: 'idle', used: [], mood: '灯还亮着'
-    }
+      scene: 'home', beat: 0, petState: 'idle', used: [], mood: '灯还亮着', homeLightsOn: true
+    },
+    conversations: [],              // 当天对话摘要，用于生成小狗来信（Guest Session）
+    dailyLetters: []
   };
 
   function save() {
@@ -42,6 +55,11 @@
       var d = JSON.parse(raw);
       if (!d || !d.story) return false;
       Object.assign(S, d);
+      if (!S.journey) S.journey = { stage: 'PET_CREATION', sceneIndex: 0, currentMemoryIndex: 0, petCompletion: 0.25, worldLevel: 0, homeConfig: null, memories: [], voiceDescription: '', petImage: 'assets/pet-idle.webp' };
+      if (typeof S.journey.sceneIndex !== 'number') S.journey.sceneIndex = 0;
+      if (typeof S.story.homeLightsOn !== 'boolean') S.story.homeLightsOn = true;
+      if (!Array.isArray(S.conversations)) S.conversations = [];
+      if (!Array.isArray(S.dailyLetters)) S.dailyLetters = [];
       return true;
     } catch (e) { return false; }
   }
@@ -334,272 +352,203 @@
     setTimeout(function () {
       var b = $('#introEnter');
       b.hidden = false;
-      b.addEventListener('click', function () { goto('s1'); }, { once: true });
+      b.addEventListener('click', function () { goto('journey'); }, { once: true });
     }, 7200);
-    setTimeout(function () { if (S.scene === 'intro') goto('s1'); }, 11000);
+    setTimeout(function () { if (S.scene === 'intro') goto('journey'); }, 11000);
   }
-  $('#skipIntro').addEventListener('click', function () { goto('s1'); });
+  $('#skipIntro').addEventListener('click', function () { goto('journey'); });
 
-  /* ── 场景 1：门口第一次相遇 ─────────────────────────────────────── */
-  var room1 = $('#room1');
-  function initS1() {
-    if (room1.dataset.ready) return;
-    room1.dataset.ready = '1';
-    buildTrail($('#trail1'), 6);
-    setDetail(0.02);
-    var slot1 = $('#pet1');
-    slot1.style.left = '25%'; slot1.style.bottom = '43%';   // 先躲在桌子底下
+  /* ── 第二阶段：JourneyPage / 连续叙事式记忆旅程 ─────────────────── */
+  var JOURNEY_NODES = [
+    { id: 'first_meeting', title: '第一次遇见 TA', reveal: '水面浮起一束暖光。第一次靠近你的那个瞬间，慢慢回来了。', priority: 2 },
+    { id: 'first_home', title: '第一次回家', reveal: '又一片光落进水里。我想起了第一次有家的感觉。', priority: 2 },
+    { id: 'habit', title: '只有你们知道的小习惯', reveal: '有一些细小的动作，只有你一眼就能认出是我。', priority: 2 },
+    { id: 'favorite_activity', title: 'TA 喜欢做什么', reveal: '水流推着我向前，也带回了那些最想奔向的地方。', priority: 2 },
+    { id: 'happiest_memory', title: '一段特别幸福的时光', reveal: '最后这束光很亮。它把所有幸福的时刻都留了下来。', priority: 3 }
+  ];
+  var journeyWorld = $('#journeyWorld');
+  var journeyCard = $('#journeyCard');
+  var journeyCreator = $('#journeyCreator');
+  var journeyConfirm = $('#journeyConfirm');
+  var journeyTimer = null;
 
-    var n = $('#n1'), a = $('#a1');
-    say(n, '<span class="dim">桌子底下有谁，还没有走出来。</span>', 700).then(function () {
-      return say(n, '如果愿意，告诉我该怎样叫 TA。', 2600);
-    }).then(function () {
-      capture(a, {
-        asr: 'name', hold: '按住，说出 TA 的名字',
-        placeholder: '写下 TA 的名字',
-        skip: '还不想说',
-        onSkip: function () { a.innerHTML = ''; askPhoto(); },
-        onDone: function (v) {
-          S.petName = v.slice(0, 12);
-          addMemory('s1', '名字：' + S.petName, 3);
-          litTrail($('#trail1'), 1);
-          bumpDetail(0.12);
-          say(n, '「<em>' + S.petName + '</em>」。这个名字在屋子里亮了一下。').then(askPhoto);
+  function journeyPersonalized(node) {
+    var voice = S.journey.voiceDescription || '';
+    var name = S.petName || 'TA';
+    var place = ['宠物店', '楼下的纸箱', '路边', '朋友家', '收容所'].filter(function (p) { return voice.indexOf(p) >= 0; })[0];
+    var shy = /胆小|躲|不出来/.test(voice);
+    var rainy = /雨|下雨/.test(voice);
+    var first = place ? '在' + place : '在那个还记不太清的地方';
+    var copy = {
+      first_meeting: { title: '我记得，第一次遇见你', reveal: first + '，' + name + (shy ? '躲在角落里，慢慢向你靠近。' : '朝你走了过来。') },
+      first_home: { title: '那天，我们一起回家', reveal: (rainy ? '雨声还在身后。' : '回去的路上，') + '你把我带回了一个可以安心待着的地方。' },
+      habit: { title: '你记得我的那些小习惯', reveal: '这些只有你认得的小动作，正在水面上一点点变清楚。' },
+      favorite_activity: { title: name + '最喜欢的事', reveal: '我记得自己会因为' + (/晒太阳/.test(voice) ? '一束阳光' : /球|玩具/.test(voice) ? '一个玩具' : '熟悉的气息') + '，忍不住往前跑。' },
+      happiest_memory: { title: '我想把那段幸福带过去', reveal: '你说过的那段时光，会变成前面彩虹桥上的光。' }
+    };
+    return copy[node.id] || { title: node.title, reveal: node.reveal };
+  }
+
+  function journeyProgress() {
+    var host = $('#journeyProgress');
+    host.innerHTML = '';
+    for (var i = 0; i < 3; i++) {
+      var paw = document.createElement('span');
+      paw.className = 'journey-paw ' + (i < S.journey.sceneIndex ? 'is-done' : i === S.journey.sceneIndex ? 'is-current' : '');
+      paw.textContent = '⌁';
+      host.appendChild(paw);
+    }
+    var bridge = document.createElement('span');
+    bridge.className = 'journey-rainbow-mark';
+    bridge.textContent = '✦';
+    host.appendChild(bridge);
+  }
+
+  function journeyWorldLevel() {
+    journeyWorld.dataset.level = String(S.journey.worldLevel || 0);
+    var creating = S.journey.stage === 'PET_CREATION' || S.journey.stage === 'PET_CONFIRM';
+    journeyWorld.dataset.sceneIndex = String(S.journey.sceneIndex || 0);
+    journeyWorld.dataset.state = creating ? 'creation' : S.journey.stage === 'RAINBOW_BRIDGE' ? 'rainbow' : 'swimming';
+    journeyWorld.classList.toggle('is-swimming', !creating);
+    journeyCard.dataset.state = creating ? 'creation' : 'story';
+    journeyCard.classList.toggle('is-over-water', !creating);
+    journeyCard.classList.toggle('is-creating', creating);
+    journeyWorld.classList.toggle('is-rainbow', S.journey.stage === 'RAINBOW_BRIDGE');
+    journeyWorld.classList.toggle('is-running', S.journey.stage === 'RUNNING');
+  }
+
+  function journeyCardReset() {
+    journeyCreator.hidden = true;
+    journeyConfirm.hidden = true;
+  }
+
+  function journeyShowNode() {
+    var node = JOURNEY_NODES[S.journey.currentMemoryIndex];
+    if (!node) return journeyRainbow();
+    var narrative = journeyPersonalized(node);
+    S.journey.stage = 'MEMORY_REVEAL';
+    journeyWorld.classList.remove('is-running'); journeyCard.classList.add('is-flowing');
+    journeyCardReset();
+    $('#journeyKicker').textContent = '记忆开始渐渐清晰';
+    $('#journeyTitle').textContent = narrative.title;
+    $('#journeyCopy').textContent = narrative.reveal;
+    journeyProgress(); journeyWorldLevel(); save();
+    journeyWorld.classList.add('is-processing');
+    setTimeout(function () {
+      journeyWorld.classList.remove('is-processing');
+      var m = addMemory('journey:' + node.id, narrative.title, node.priority);
+      m.summary = narrative.title; m.narrative = narrative.reveal; m.memoryType = node.id; m.emotion = node.id === 'happiest_memory' ? 'joy' : 'warm';
+      m.petTraits = S.profile.traits.slice(); m.petBehaviors = S.profile.habits.slice(); m.homeAssets = [node.id];
+      S.journey.memories.push(m);
+      S.journey.currentMemoryIndex += 1;
+      S.journey.petCompletion = [0.25, 0.4, 0.55, 0.7, 0.85, 1][Math.min(S.journey.currentMemoryIndex, 5)];
+      S.journey.worldLevel = Math.min(5, S.journey.worldLevel + 1);
+      setDetail(S.journey.petCompletion);
+      journeyProgress(); journeyWorldLevel(); save();
+      journeyTimer = setTimeout(journeyShowNode, 2300);
+    }, 1700);
+  }
+
+  function journeyRainbow() {
+    S.journey.stage = 'RAINBOW_BRIDGE';
+    S.journey.sceneIndex = 2;
+    S.journey.petCompletion = 1; S.journey.worldLevel = 5; setDetail(1);
+    journeyCardReset();
+    $('#journeyKicker').textContent = '彩虹桥';
+    $('#journeyTitle').textContent = (S.petName || 'TA') + '要走过彩虹桥了。';
+    $('#journeyCopy').textContent = '你刚才说起的那些记忆，正在前面汇成一束光。';
+    $('.pet', $('#journeyPet')).src = POSE.run;
+    journeyWorldLevel(); journeyProgress(); save();
+    clearTimeout(journeyTimer);
+  }
+
+  function initJourney() {
+    if (!journeyWorld.dataset.bound) {
+      journeyWorld.dataset.bound = '1';
+      journeyWorld.addEventListener('click', function (e) {
+        if (S.journey.stage === 'PET_CREATION' || S.journey.stage === 'PET_CONFIRM') return;
+        if (S.journey.sceneIndex === 0) {
+          S.journey.sceneIndex = 1; S.journey.worldLevel = 2;
+          $('#journeyKicker').textContent = '记忆旅程'; $('#journeyTitle').textContent = '一些画面开始浮现。'; $('#journeyCopy').textContent = '再往前一点，彩虹桥就在前面。';
+          journeyWorldLevel(); journeyProgress(); save(); return;
         }
+        if (S.journey.sceneIndex === 1) {
+          S.journey.sceneIndex = 2; S.journey.stage = 'RAINBOW_BRIDGE'; S.journey.worldLevel = 5; setDetail(1);
+          journeyRainbow(); return;
+        }
+        if (S.journey.sceneIndex === 2) { S.journey.stage = 'HOME_GENERATING'; goto('weave'); }
       });
-    });
-
-    function askPhoto() {
-      say(n, '<span class="dim">要不要放一张 TA 的照片？轮廓会更像一点。</span>', 600).then(function () {
-        a.innerHTML = '';
-        var col = document.createElement('div');
-        col.className = 'slot';
-        var lab = document.createElement('label');
-        lab.className = 'primary-btn';
-        lab.style.display = 'inline-flex';
-        lab.style.alignItems = 'center';
-        lab.style.gap = '8px';
-        lab.innerHTML = '<svg viewBox="0 0 24 24" width="17" height="17" style="stroke:currentColor;fill:none"><use href="#camera"></use></svg><span>放一张 TA 的照片</span>';
-        var inp = document.createElement('input');
-        inp.type = 'file'; inp.accept = 'image/*'; inp.hidden = true;
-        lab.appendChild(inp);
-        var skip = document.createElement('button');
-        skip.type = 'button'; skip.className = 'ghost-btn'; skip.textContent = '以后再说';
-        col.appendChild(lab); col.appendChild(skip);
-        a.appendChild(col);
-
-        inp.addEventListener('change', function () {
-          if (!inp.files || !inp.files[0]) return;
-          S.hasPhoto = true; bumpDetail(0.2); save();
-          a.innerHTML = '';
-          askMeet('<span class="dim">照片收下了。毛色和耳朵慢慢对上了。</span>');
-        });
-        skip.addEventListener('click', function () {
-          a.innerHTML = '';
-          askMeet('<span class="dim">没关系，先这样。</span>');
-        });
+      $('#journeyVoice').addEventListener('click', function () {
+        var voice = this;
+        if (voice.disabled) return;
+        voice.disabled = true; voice.classList.add('is-listening');
+        $('#journeyVoiceLabel').textContent = '正在听…松开后，TA 会慢慢出现';
+        setTimeout(function () {
+        S.petName = S.petName || mockASR('name');
+        S.journey.voiceDescription = mockASR('meet');
+        S.journey.petImage = 'assets/pet-idle.webp';
+        S.hasPhoto = true;
+        S.journey.stage = 'PET_CONFIRM'; setDetail(0.35); journeyWorld.classList.remove('is-running'); journeyCardReset(); journeyConfirm.hidden = false;
+        $('#journeyKicker').textContent = ''; $('#journeyTitle').textContent = '我想起来啦'; $('#journeyCopy').textContent = '我是这样的一只小狗对嘛？';
+        journeyProgress(); journeyWorldLevel(); save();
+        }, 1100);
+      });
+      $('#journeyRegeneratePhoto').addEventListener('change', function () {
+        var file = this.files && this.files[0]; if (!file) return;
+        var reader = new FileReader();
+        reader.onload = function () {
+          S.journey.petReferenceImage = reader.result;
+          S.journey.regenerationPrompt = [S.journey.voiceDescription, '根据补充照片校准外形'].filter(Boolean).join('；');
+          S.journey.isRegenerating = true;
+          var pet = $('#journeyConfirmPet');
+          pet.classList.add('is-regenerating');
+          $('#journeyCopy').textContent = '正在根据照片和描述重新生成……';
+          $('#journeyConfirmBtn').disabled = true;
+          setTimeout(function () {
+            // Mock 生成：真实接入时将 regenerationPrompt 与参考图传给生图服务。
+            var voice = S.journey.voiceDescription || '';
+            var pose = /跑|奔|活泼/.test(voice) ? POSE.approach : /躲|胆小|雨/.test(voice) ? POSE.down : POSE.idle;
+            pet.src = pose; pet.classList.remove('is-regenerating');
+            S.journey.petImage = pose; S.journey.isRegenerating = false; S.hasPhoto = true;
+            $('#journeyCopy').textContent = '照片和描述都记住了。这个样子更像你记忆里的我了吗？';
+            $('#journeyConfirmBtn').disabled = false; save();
+          }, 1500);
+        };
+        reader.readAsDataURL(file);
+      });
+      $('#journeyConfirmBtn').addEventListener('click', function () {
+        $('.pet', $('#journeyPet')).src = S.journey.petImage || POSE.idle;
+        S.journey.stage = 'RUNNING'; S.journey.sceneIndex = 0; S.journey.currentMemoryIndex = 0; S.journey.petCompletion = 0.25; S.journey.worldLevel = 1;
+        setDetail(0.25); journeyWorld.classList.add('is-running'); journeyCardReset();
+        $('#journeyKicker').textContent = '记忆旅程'; $('#journeyTitle').textContent = (S.petName || 'TA') + '，好像想起来一点了。'; $('#journeyCopy').textContent = S.journey.voiceDescription ? '你说起的' + (S.journey.voiceDescription.slice(0, 20)) + '……正在水里慢慢回来。' : '跟着 TA 向前走，世界会一点点回来。';
+        journeyProgress(); journeyWorldLevel(); save();
+        clearTimeout(journeyTimer);
       });
     }
-
-    function askMeet(pre) {
-      say(n, pre).then(function () {
-        return say(n, '第一次见到 TA，是在什么地方？', 1800);
-      }).then(function () {
-        capture(a, {
-          asr: 'meet', hold: '按住，讲第一次见面',
-          placeholder: '第一次见到 TA 的时候…',
-          onDone: function (v) {
-            var m = addMemory('s1', v, 2);
-            addPaw('s1', '第一次见面', m.id);
-            worldPatch1();
-          }
-        });
-      });
-    }
-
-    // 世界变化代替确认文案：说完之后，物件和路径立刻长出来
-    function worldPatch1() {
-      say(n, '<span class="dim">房间跟着你说的话，一点点长出来。</span>');
-      var objs = $$('.obj', room1);
-      objs.forEach(function (o, i) {
-        setTimeout(function () { o.classList.remove('is-off'); }, 500 + i * 700);
-      });
-      setTimeout(function () { litTrail($('#trail1'), 3); }, 1600);
-      setTimeout(function () {
-        var slot = $('#pet1');
-        slot.style.left = '52%';
-        slot.style.bottom = '44%';
-        $('.pet', slot).src = POSE.approach;
-        bumpDetail(0.22);
-      }, 2400);
-      setTimeout(function () {
-        var extra = S.profile.place ? '在<em>' + S.profile.place + '</em>' : '在那里';
-        say($('#n1'), '轮廓比刚才清楚了一些。' + (S.petName ? S.petName : 'TA') + '从桌子底下探出头。');
-        actionButton($('#a1'), '跟上去', function () { goto('s2'); });
-      }, 4200);
-    }
+    var stage = S.journey.stage || 'PET_CREATION';
+    if (stage === 'PET_CREATION') {
+      journeyCardReset(); journeyCard.classList.remove('is-flowing'); journeyCreator.hidden = false;
+      $('#journeyKicker').textContent = ''; $('#journeyTitle').innerHTML = '我好像……<br>记不清自己原来的样子了'; $('#journeyCopy').textContent = '你可以帮我想起来吗？';
+    } else if (stage === 'PET_CONFIRM') {
+      journeyCardReset(); journeyCard.classList.remove('is-flowing'); journeyConfirm.hidden = false;
+      $('#journeyConfirmPet').src = S.journey.petImage || 'assets/pet-idle.webp';
+      $('#journeyKicker').textContent = ''; $('#journeyTitle').textContent = '我想起来啦'; $('#journeyCopy').textContent = '我是这样的一只小狗对嘛？';
+    } else if (stage === 'MEMORY_INPUT' || stage === 'MEMORY_REVEAL' || stage === 'MEMORY_PROCESSING') journeyShowNode();
+    else if (stage === 'RAINBOW_BRIDGE') journeyRainbow();
+    else if (stage === 'RUNNING') { journeyCardReset(); journeyWorld.classList.add('is-running'); clearTimeout(journeyTimer); }
+    journeyProgress(); journeyWorldLevel();
   }
 
-  /* ── 场景 2：普通的一天 ─────────────────────────────────────────── */
-  var room2 = $('#room2');
-  var TOUCH = {
-    window: { pos: [15, 45], pose: 'idle',     line: '阳光正好落在窗边那块地板上，TA 走过去趴下，尾巴慢慢摆了两下。', mem: '喜欢在窗边晒太阳', tag: '窗边的太阳' },
-    bowl:   { pos: [31, 42], pose: 'happy',    line: '饭盆一响，TA 立刻转了两圈，急得原地打转。', mem: '吃饭前会转圈，很贪吃', tag: '饭盆响了', anim: 'bounce' },
-    keys:   { pos: [60, 43], pose: 'run',      line: '钥匙响了。TA 冲过去，脚下打滑，还是先到了门口。', mem: '听到钥匙声会冲到门口', tag: '钥匙的声音', anim: 'run' },
-    sofa:   { pos: [73, 51], pose: 'down',     line: '沙发那头有一个凹下去的位置，刚好是 TA 的形状。', mem: '常待在沙发一角', tag: '沙发的角落' },
-    leash:  { pos: [46, 45], pose: 'happy',    line: '牵引绳晃了一下，TA 抬起头，一直看着它。', mem: '看到牵引绳就想出门', tag: '牵引绳', anim: 'bounce' },
-    bed:    { pos: [42, 41], pose: 'down',     line: '床边留着一小块空位。夜里安静下来的时候，那里最软。', mem: '夜里睡在床边', tag: '床边的位置' }
-  };
-  var touched = 0;
-
-  function initS2() {
-    if (room2.dataset.ready) return;
-    room2.dataset.ready = '1';
-    buildTrail($('#trail2'), 8);
-    litTrail($('#trail2'), 3);
-    $('.pet', $('#pet2')).src = POSE.idle;
-
-    var order = ['window', 'bowl', 'keys', 'sofa', 'leash', 'bed'];
-    order.forEach(function (k, i) {
-      var el = $('[data-touch="' + k + '"]', room2);
-      el.classList.add('is-off');
-      setTimeout(function () { el.classList.remove('is-off'); }, 400 + i * 900);
-    });
-
-    var n = $('#n2'), a = $('#a2');
-    say(n, '<span class="dim">早晨的光从窗户进来。今天和从前的每一天一样。</span>', 600);
-
-    $$('[data-touch]', room2).forEach(function (el) {
-      var k = el.dataset.touch;
-      var fire = function () { onTouch(k, el); };
-      el.addEventListener('click', fire);
-      el.addEventListener('keydown', function (e) {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fire(); }
-      });
-    });
-
-    function onTouch(key, el) {
-      if (el.classList.contains('is-done')) return;
-      var t = TOUCH[key];
-      el.classList.add('is-done', 'is-active');
-      setTimeout(function () { el.classList.remove('is-active'); }, 1600);
-      $('#touchHint').classList.add('is-hidden');
-
-      var slot = $('#pet2');
-      slot.classList.toggle('face-left', t.pos[0] < parseFloat(slot.style.left || '50'));
-      slot.style.left = t.pos[0] + '%';
-      slot.style.bottom = t.pos[1] + '%';
-      $('.pet', slot).src = POSE[t.pose];
-      if (t.anim) {
-        slot.classList.add(t.anim === 'run' ? 'is-running' : 'is-bouncing');
-        setTimeout(function () { slot.classList.remove('is-running', 'is-bouncing'); }, 2000);
-      }
-
-      var m = addMemory('s2', t.mem, 1);
-      addPaw('s2', t.tag, m.id);
-      if (S.profile.objects.indexOf(key) < 0) S.profile.objects.push(key);
-      if (S.profile.habits.indexOf(t.mem) < 0) S.profile.habits.push(t.mem);
-      save();
-
-      touched++;
-      litTrail($('#trail2'), 3 + touched);
-      room2.dataset.time = touched >= 5 ? 'night' : touched >= 3 ? 'dusk' : '';
-      tintDock();
-      say(n, withName(t.line));
-
-      if (touched === 3) setTimeout(askDay, 2600);
-      if (touched >= 4) setTimeout(offerNext, 2600);
-    }
-
-    function tintDock() {
-      var t = room2.dataset.time;
-      scenes.s2.style.setProperty('--dock-tint',
-        t === 'night' ? '188,168,142' : t === 'dusk' ? '226,207,176' : '241,226,199');
-    }
-
-    function askDay() {
-      say(n, withName('<span class="dim">TA 普通的一天，还会做什么？</span>'), 400)
-        .then(function () {
-          capture(a, {
-            asr: 'day', hold: '按住，说说这一天',
-            placeholder: '早上、白天、晚上…',
-            skip: '再碰碰别的',
-            onSkip: function () { a.innerHTML = ''; },
-            onDone: function (v) {
-              var m = addMemory('s2', v, 2);
-              addPaw('s2', '普通的一天', m.id);
-              litTrail($('#trail2'), 8);
-              say(n, '<span class="dim">屋子记下了这些。天色晚了一点。</span>');
-              room2.dataset.time = 'dusk'; tintDock();
-              setTimeout(offerNext, 2000);
-            }
-          });
-        });
-    }
-
-    function offerNext() {
-      if ($('.paw-btn', a) || $('.field', a)) return;
-      say(n, '<span class="dim">灯一盏一盏灭了。有几枚脚印还亮着。</span>');
-      room2.dataset.time = 'night'; tintDock();
-      actionButton(a, '往前走', function () { goto('s3'); });
-    }
-  }
-
-  /* ── 场景 3：留下最不想失去的记忆 ───────────────────────────────── */
-  function initS3() {
-    var field = $('#pawField');
-    if (field.dataset.ready) return;
-    field.dataset.ready = '1';
-
-    var n = $('#n3'), a = $('#a3');
-    var p3 = $('#pet3');
-    p3.style.left = '76%'; p3.style.bottom = '36%'; p3.classList.add('face-left');
-    var marks = S.pawMarks.slice(-6);
-    if (!marks.length) marks = [{ id: 'p0', label: '还没有名字的一天' }];
-    var spots = [[13, 11], [48, 7], [25, 27], [58, 24], [16, 43], [45, 41]];
-
-    marks.forEach(function (mk, i) {
-      var b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'paw-choice';
-      b.style.left = spots[i % spots.length][0] + '%';
-      b.style.top = spots[i % spots.length][1] + '%';
-      b.innerHTML = '<svg viewBox="0 0 26 26"><use href="#paw"></use></svg><span class="tag">' + mk.label + '</span>';
-      b.style.animationDelay = (i * 0.2) + 's';
-      b.addEventListener('click', function () { choose(b, mk); });
-      field.appendChild(b);
-    });
-
-    say(n, '<span class="dim">今天走过的地方，都还留着。</span>', 600).then(function () {
-      return say(n, '选一枚，把最不想弄丢的那一段留在这里。', 2400);
-    });
-
-    var chosen = false;
-    function choose(btn, mk) {
-      if (chosen) return;
-      chosen = true;
-      $$('.paw-choice', field).forEach(function (o) { if (o !== btn) o.classList.add('is-dimmed'); });
-      btn.classList.add('is-chosen');
-      say(n, '就是这一枚。<span class="dim">' + mk.label + '。</span>').then(function () {
-        capture(a, {
-          asr: 'keep', hold: '按住，把它说完整',
-          placeholder: '那一次…',
-          onDone: function (v) {
-            var m = addMemory('s3', v, 3);           // 高优先级，聊天优先使用
-            S.profile.precious = SENSITIVE.test(v) ? '' : v;
-            btn.classList.add('is-kept');
-            bumpDetail(0.3);
-            save();
-            say(n, '这一枚会一直亮着。<span class="dim">往后每次回来，先经过它。</span>');
-            setTimeout(function () { actionButton(a, '回家', function () { goto('weave'); }); }, 1600);
-          }
-        });
-      });
-    }
-  }
 
   /* ── 家园生成 ───────────────────────────────────────────────────── */
   function initWeave() {
+    S.journey.stage = 'HOME_GENERATING';
+    if (!S.journey.homeConfig) {
+      S.journey.homeConfig = {
+        theme: 'warm_nature', lighting: 'sunny',
+        assets: S.journey.memories.map(function (m) { return m.memoryType; })
+      };
+    }
     var w = scenes.weave;
     if (w.dataset.ready) return;
     w.dataset.ready = '1';
@@ -623,11 +572,106 @@
     say(n, '<span class="dim">脚印一枚一枚，走回同一个地方。</span>', 500);
     say(n, '<span class="dim">墙立起来了，灯挂上去了。</span>', 3200);
     say(n, '家已经在这里了。', 5400);
-    setTimeout(function () { if (S.scene === 'weave') goto('companion'); }, 7400);
+    setTimeout(function () { if (S.scene === 'weave') goto('home'); }, 7400);
   }
 
   /* ────────────────────────────────────────────────────────────────────
-     5. Companion：想象性陪伴叙事
+     5. 第三阶段：首页（房子 / 信箱 / 熄灯休息）
+     ──────────────────────────────────────────────────────────────────── */
+  var homeHub = $('[data-scene="home"]');
+  var homeNoteTimer = null;
+
+  function localDay() {
+    try { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date()); }
+    catch (e) { return new Date().toISOString().slice(0, 10); }
+  }
+  function localDayLabel() {
+    try { return new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: 'long', day: 'numeric' }).format(new Date()); }
+    catch (e) { return localDay(); }
+  }
+  function rememberConversation(text) {
+    S.conversations.push({ day: localDay(), text: String(text), at: Date.now() });
+    S.conversations = S.conversations.slice(-60);
+  }
+  function buildDailyLetter() {
+    var day = localDay();
+    var turns = S.conversations.filter(function (item) { return item.day === day; });
+    var old = S.dailyLetters.filter(function (item) { return item.day === day; })[0];
+    if (old && old.turnCount === turns.length) return old;
+
+    var pet = S.petName || '我';
+    var first = turns[0] && turns[0].text.replace(/\s+/g, ' ').slice(0, 34);
+    var last = turns[turns.length - 1] && turns[turns.length - 1].text.replace(/\s+/g, ' ').slice(0, 34);
+    var paragraphs;
+    if (turns.length) {
+      paragraphs = [
+        '今天你来和我说话了。你说“' + first + (first.length >= 34 ? '…' : '') + '”，我一直记着。',
+        turns.length > 1
+          ? '后来你又说“' + last + (last.length >= 34 ? '…' : '') + '”。这些话我都收好，放在我们家最暖的地方。'
+          : '我听见以后，把尾巴轻轻扫了两下。你不用急着说完，我会慢慢听。',
+        '等你下次回来，信箱还是开着的，我也会在这里。'
+      ];
+    } else {
+      paragraphs = [
+        '今天屋子很安静，我在窗边待了一会儿，也看了一会儿门。',
+        '还没有听见你的声音没关系。等你想说话的时候，我就在这里。'
+      ];
+    }
+    var letter = { day: day, turnCount: turns.length, paragraphs: paragraphs, sign: pet };
+    S.dailyLetters = S.dailyLetters.filter(function (item) { return item.day !== day; }).concat(letter).slice(-21);
+    save();
+    return letter;
+  }
+  function showHomeNote(text) {
+    var note = $('#homeNote');
+    note.textContent = text;
+    note.classList.add('is-visible');
+    clearTimeout(homeNoteTimer);
+    homeNoteTimer = setTimeout(function () { note.classList.remove('is-visible'); }, 2600);
+  }
+  function setHomeLights(on, announce) {
+    S.story.homeLightsOn = on;
+    S.story.petState = on ? 'idle' : 'down';
+    homeHub.classList.toggle('is-lights-off', !on);
+    $('#homeLamp').setAttribute('aria-label', on ? '关灯，让小狗休息' : '开灯，叫醒小狗');
+    if (announce) showHomeNote(on ? '灯亮起来了，TA 抬头看了看你。' : '灯熄了，TA 趴下休息。');
+    save();
+  }
+  function openLetter() {
+    var letter = buildDailyLetter();
+    var body = $('#letterBody');
+    body.innerHTML = '';
+    letter.paragraphs.forEach(function (paragraph) {
+      var p = document.createElement('p'); p.textContent = paragraph; body.appendChild(p);
+    });
+    $('#letterDate').textContent = localDayLabel();
+    $('#letterSign').textContent = '— ' + letter.sign;
+    $('#letterSheet').hidden = false;
+    goto('letter');
+  }
+  function initLetter() {
+    if ($('#letterSheet').hidden) openLetter();
+  }
+  function initHome() {
+    S.journey.stage = 'COMPLETE';
+    setDetail(1);
+    setHomeLights(S.story.homeLightsOn !== false, false);
+  }
+
+  $('#homeLamp').addEventListener('click', function () { setHomeLights(!S.story.homeLightsOn, true); });
+  $('#homeMailbox').addEventListener('click', openLetter);
+  $('#homeBowl').addEventListener('click', function () {
+    if (!S.story.homeLightsOn) setHomeLights(true, false);
+    showHomeNote('TA 走到饭盆旁边，摇了摇尾巴。');
+  });
+  $('#homePet').addEventListener('click', function () {
+    goto('companion');
+  });
+  $('#letterClose').addEventListener('click', function () { $('#letterSheet').hidden = true; goto('home'); });
+  $('#homeBack').addEventListener('click', function () { goto('home'); });
+
+  /* ────────────────────────────────────────────────────────────────────
+     6. Companion：想象性陪伴叙事
         每一轮 = 环境描述 → 角色动作 → 角色对白 → 事件推进
         真实 Memory 只约束"TA 是谁"，不规定接下来聊什么；
         新故事绝不写成"我们以前发生过的事"。
@@ -697,13 +741,20 @@
     p.textContent = text;
     return p;
   }
-  function scrollEnd() { thread.scrollTop = thread.scrollHeight; }
+  function isThreadNearBottom() {
+    return thread.scrollHeight - thread.scrollTop - thread.clientHeight < 42;
+  }
+  function scrollEnd(force) {
+    if (!force && !isThreadNearBottom()) return;
+    thread.scrollTo({ top: thread.scrollHeight, behavior: force ? 'smooth' : 'auto' });
+  }
 
   function typing() {
     var t = document.createElement('div');
     t.className = 'typing';
     t.innerHTML = '<i></i><i></i><i></i>';
-    thread.appendChild(t); scrollEnd();
+    var follow = isThreadNearBottom();
+    thread.appendChild(t); if (follow) scrollEnd(true);
     return t;
   }
 
@@ -738,16 +789,17 @@
     var t = typing();
     await sleep(700);
     t.remove();
-    thread.appendChild(box); scrollEnd();
+    var follow = isThreadNearBottom();
+    thread.appendChild(box); if (follow) scrollEnd(true);
 
-    box.appendChild(line('line-env', beat.env)); scrollEnd();
+    box.appendChild(line('line-env', beat.env)); if (follow) scrollEnd(true);
     await sleep(750);
     setPose(beat.pose);
-    box.appendChild(line('line-act', beat.act.replace(/\{n\}/g, N()))); scrollEnd();
+    box.appendChild(line('line-act', beat.act.replace(/\{n\}/g, N()))); if (follow) scrollEnd(true);
     await sleep(850);
-    box.appendChild(line('line-say', beat.say)); scrollEnd();
+    box.appendChild(line('line-say', beat.say)); if (follow) scrollEnd(true);
     await sleep(650);
-    box.appendChild(line('line-push', withName(beat.push))); scrollEnd();
+    box.appendChild(line('line-push', withName(beat.push))); if (follow) scrollEnd(true);
 
     S.story.mood = beat.mood || S.story.mood;
     $('#cSub').textContent = S.story.mood;
@@ -761,8 +813,10 @@
     busy = true;
     $('#btnContinue').classList.remove('is-nudging');
 
+    var follow = isThreadNearBottom();
     var me = line('line-me', text);
-    thread.appendChild(me); scrollEnd();
+    thread.appendChild(me); if (follow) scrollEnd(true);
+    rememberConversation(text);
 
     // 情绪保护：强烈痛苦时温和陪伴，并提示联系信任的人或专业支持
     if (DISTRESS.test(text)) {
@@ -773,7 +827,7 @@
       b1.appendChild(line('line-say', '不用说了。我在这儿，你想坐多久都行。'));
       await sleep(600);
       b1.appendChild(line('line-soft', '如果心里太沉，也可以和你信任的人说说，或者找专业的支持聊一聊。'));
-      scrollEnd(); busy = false; save(); return;
+      if (follow) scrollEnd(true); busy = false; save(); return;
     }
 
     // 自然纠正：进入后台候选修正，不直接覆盖既有 Memory
@@ -783,7 +837,7 @@
       b2.appendChild(line('line-act', N() + '歪了一下头，像是在等你把话说完。'));
       await sleep(600);
       b2.appendChild(line('line-say', '嗯，那我记住这个。'));
-      scrollEnd();
+      if (follow) scrollEnd(true);
       S.story.threads = (S.story.threads || []).concat([{ type: 'correction', rawText: text, confirmed: false }]);
       save(); busy = false;
       return;
@@ -801,22 +855,17 @@
     b3.appendChild(line('line-act', r.act));
     await sleep(650);
     b3.appendChild(line('line-say', r.say));
-    scrollEnd();
+    if (follow) scrollEnd(true);
     busy = false; save();
     setTimeout(function () { if (!busy) playBeat(nextBeat()); }, 1400);
   }
 
   function initCompanion() {
-    setDetail(Math.max(S.detail, 0.72));   // Memory 不足也不阻塞，使用低细节 Base 形象
+    S.journey.stage = 'COMPLETE';
+    setDetail(1);                          // 进入家园后以清晰的 Base 形象陪伴
     $('#cName').textContent = S.petName ? S.petName + '的家' : '家';
     $('#cSub').textContent = S.story.mood;
     $('.pet', petC).src = POSE[S.story.petState] || POSE.idle;
-
-    // 固定 Base 家园背景，只替换少量安全元素
-    ['window', 'mailbox'].forEach(function (k) { $('[data-safe="' + k + '"]').classList.add('is-on'); });
-    if (S.profile.objects.indexOf('bowl') >= 0) $('[data-safe="bowl"]').classList.add('is-on');
-    if (S.profile.objects.indexOf('球') >= 0 || S.profile.objects.indexOf('玩具') >= 0)
-      $('[data-safe="ball"]').classList.add('is-on');
 
     if (thread.dataset.ready) return;
     thread.dataset.ready = '1';
@@ -828,6 +877,7 @@
       thread.appendChild(open);
       setTimeout(function () { playBeat(nextBeat()); }, 900);   // 首次自动开场
     }
+    requestAnimationFrame(function () { thread.scrollTop = thread.scrollHeight; });
   }
 
   $('#composer').addEventListener('submit', function (e) {
@@ -847,11 +897,11 @@
      6. 启动
      ──────────────────────────────────────────────────────────────────── */
   var SCENE_INIT = {
-    intro: initIntro, s1: initS1, s2: initS2, s3: initS3,
-    weave: initWeave, companion: initCompanion
+    intro: initIntro, journey: initJourney,
+    weave: initWeave, home: initHome, letter: initLetter, companion: initCompanion
   };
 
-  var jump = { '1': 'intro', '2': 's1', '3': 's2', '4': 's3', '5': 'companion' };
+  var jump = { '1': 'intro', '2': 'journey', '3': 'home', '4': 'companion' };
   document.addEventListener('keydown', function (e) {
     if (e.target && e.target.matches && e.target.matches('input, textarea')) return;
     if (jump[e.key]) goto(jump[e.key]);
@@ -862,5 +912,5 @@
 
   var resumed = load();
   setDetail(S.detail);
-  goto(resumed && S.scene === 'companion' ? 'companion' : 'intro');
+  goto(resumed && (S.scene === 'home' || S.scene === 'letter' || S.scene === 'companion') ? S.scene : 'intro');
 })();

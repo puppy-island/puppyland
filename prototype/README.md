@@ -11,7 +11,7 @@ python3 -m http.server 4321 --directory prototype
 
 打开 <http://localhost:4321>。演示时用手机尺寸窗口最佳（≤520px 宽自动全屏）。
 
-- 键盘 `1`–`5`：跳到 开场 / 场景一 / 场景二 / 场景三 / Companion
+- 键盘 `1`：开场；`2`：第二阶段记忆旅程；`3`：第三阶段家园；`4`：小狗对话。
 - 键盘 `R`：清空 Guest Session 重来
 - 控制台 `__mh`：`{ S, goto, reset, addMemory, addPaw }`
 
@@ -23,6 +23,8 @@ python3 -m http.server 4321 --directory prototype
 | `style.css` | 设计 token、场景与物件样式 |
 | `app.js` | 状态机、Mock 记忆解释器、Mock ASR、Story Engine |
 | `assets/pet-*.webp` | Base 形象 4 张姿态图（从 `小白狗多种姿势.png` 抠图） |
+| `assets/house2.png` | 第三阶段家园主界面背景 |
+| `assets/home.png` | 第三阶段家园主界面新版插画背景 |
 | `build.py` | 打包成单文件 `dist/index.html`（图片转 data URI） |
 
 ## 设计基准
@@ -46,11 +48,11 @@ python3 -m http.server 4321 --directory prototype
 | PRD | 实现位置 |
 |---|---|
 | 场景 0：6–10 秒脚步开场，可跳过 | `initIntro()` / `[data-scene="intro"]` |
-| 场景一：发光爪印邀请说名字、可选照片、模糊轮廓 | `initS1()`，清晰度由 `--detail` 驱动 blur |
-| 场景二：早晨→夜晚、触碰物件触发动作 | `initS2()` / `TOUCH` 表 / `room[data-time]` |
-| 场景三：选一枚爪印，留下最不想失去的记忆 | `initS3()`，`priority: 3` |
+| 第二阶段：草地 → 游泳 → 彩虹桥 | `initJourney()`，点击任意场景推进 |
 | 家园生成 | `initWeave()`，房子描边后填色 |
-| Companion：固定 Base 家园背景 + 文字聊天 | `initCompanion()` / `.house` |
+| 第二阶段：三幕记忆旅程 | `initJourney()`，草地 → 游泳 → 彩虹桥，点击任意场景推进 |
+| 第三阶段主界面：点击小狗进入对话、点击信箱读当天来信、点击灯熄灯休息 | `initHome()` / `.home-hub` |
+| 小狗对话 | `initCompanion()` / `.house` |
 | 环境 → 动作 → 对白 → 事件推进 | `BEATS` + `playBeat()` |
 | 输入框右侧「继续」推进剧情 | `#btnContinue` |
 | 语音录音 → Mock ASR → 发送前编辑 → 退化为文字 | `capture()` |
@@ -58,7 +60,8 @@ python3 -m http.server 4321 --directory prototype
 | 敏感 Memory 完全排除出 grounding | `SENSITIVE` → `groundingAllowed: false` |
 | 情绪保护：温和陪伴 + 提示寻求支持 | `DISTRESS` 分支 |
 | 自然纠正不直接覆盖既有 Memory | `respond()` 的纠正分支 → `StoryState.threads` 候选 |
-| Guest Session 当前设备永久保存 | `localStorage['memoryhome.guest.v1']`，`scene==='companion'` 时直接续上 |
+| Guest Session 当前设备永久保存 | `localStorage['memoryhome.guest.v1']`，家园 / 对话页面可直接续上 |
+| 每日来信 | `buildDailyLetter()` 根据当天本地对话生成，保存在 Guest Session |
 | 5 种基础姿态 | `POSE`：idle / approach(靠近·开心) / run(奔跑) / down(低落) |
 
 ## 接真服务时要换掉的地方

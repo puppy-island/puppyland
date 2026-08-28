@@ -12,11 +12,17 @@ body = re.search(r"<body>(.*)</body>", html, re.S).group(1)
 body = body.replace('<link rel="stylesheet" href="style.css">', "")
 body = body.replace('<script src="app.js"></script>', "")
 
-for f in sorted((root / "assets").glob("*.webp")):
-    uri = "data:image/webp;base64," + base64.b64encode(f.read_bytes()).decode()
+for f in sorted((root / "assets").iterdir()):
+    if not f.is_file():
+        continue
+    mime = {".webp": "image/webp", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}.get(f.suffix.lower())
+    if not mime:
+        continue
+    uri = mime + ";base64," + base64.b64encode(f.read_bytes()).decode()
     ref = f"assets/{f.name}"
     body = body.replace(ref, uri)
     js = js.replace(ref, uri)
+    css = css.replace(ref, uri)
 
 fonts = ('<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
          '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?'
