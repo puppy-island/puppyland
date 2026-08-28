@@ -109,6 +109,7 @@ body{
   transition:opacity .9s var(--ease), visibility .9s;
 }
 .scene.is-active{ opacity:1; visibility:visible; }
+.scene.is-leaving{ opacity:0 !important; visibility:hidden !important; transition:none !important; }
 .scene{ --dock-tint:241,226,199; }
 
 .world{ position:absolute; inset:0; overflow:hidden; }
