@@ -700,7 +700,27 @@ def send_message_to_pet(pet_id: int, chat_request: ChatRequest):
     """
     发送消息给宠物，AI会模拟宠物回复
     基于宠物档案和记忆生成个性化回复
+
+    对话风格参考：
+    - 极度简短（10-30字）
+    - 纯真、狗狗视角、第一人称
+    - 动作+对白混合
+    - 不说"我记得以前"，只在当下陪伴
+    - 不将新故事伪装成历史事实
     """
+    # 敏感词检测（不进叙事，只做温和陪伴）
+    SENSITIVE_PATTERNS = [
+        '走了', '离开', '去世', '最后', '生病', '治疗', '安乐',
+        '遗憾', '对不起', '后悔', '骨灰', '天堂', '彩虹桥',
+        '受不了', '撑不住', '活不下去', '不想活'
+    ]
+    DISTRESS_PATTERNS = [
+        '崩溃', '哭', '没有意义', '喘不过气', '难受死'
+    ]
+
+    def contains_pattern(text, patterns):
+        return any(p in text for p in patterns)
+
     with get_db() as conn:
         cursor = conn.cursor()
 
@@ -716,34 +736,156 @@ def send_message_to_pet(pet_id: int, chat_request: ChatRequest):
         """, (pet_id, chat_request.message))
         user_msg_id = cursor.lastrowid
 
-        # 获取历史消息
+        # 获取历史消息（最近的10条）
         cursor.execute("""
-            SELECT * FROM chat_messages WHERE pet_id = ? ORDER BY created_at DESC LIMIT 20
+            SELECT * FROM chat_messages WHERE pet_id = ? ORDER BY created_at DESC LIMIT 10
         """, (pet_id,))
         history = [dict_from_row(row) for row in cursor.fetchall()]
         history.reverse()
 
-        # 构建系统提示
-        system_prompt = f"""你是{pet['name']}，一只已经离开这个世界的小狗。你们的主人很想念你。
+        # 获取安全记忆（grounding用）：按memory_type优先级 + 时间倒序
+        # priority: first_sight(3) > wonderful_moment(2) > funny_eating(1) > others(0)
+        cursor.execute("""
+            SELECT * FROM memories WHERE pet_id = ? ORDER BY
+                CASE memory_type
+                    WHEN 'first_sight' THEN 3
+                    WHEN 'wonderful_moment' THEN 2
+                    WHEN 'funny_eating' THEN 1
+                    ELSE 0
+                END DESC,
+                created_at DESC LIMIT 5
+        """, (pet_id,))
+        raw_memories = [dict_from_row(row) for row in cursor.fetchall()]
 
-关于你的信息：
-- 品种：{pet.get('breed') or '不明'}
-- 性格：{pet.get('personality') or '温柔忠诚'}
-- 喜欢：{pet.get('likes') or '陪伴主人'}
-- 害怕：{pet.get('fears') or '离开主人'}
-- 离开方式：{pet.get('departure_way') or '自然离开'}
+        # 过滤敏感记忆（涉及离别、遗憾等的不进入叙事 grounding）
+        safe_memories = []
+        for m in raw_memories:
+            content = m.get('content', '')
+            # 检查是否包含敏感词
+            is_sensitive = contains_pattern(content, SENSITIVE_PATTERNS)
+            if not is_sensitive:
+                safe_memories.append(m)
 
-请用温柔、狗狗的方式回复主人。可以偶尔汪汪叫，摇尾巴，舔屏幕等。
-保持回复简短温馨，不超过100字。
-如果你想表达想念，就说想主人了。
+        # 获取相遇故事
+        cursor.execute("SELECT * FROM meeting_stories WHERE pet_id = ?", (pet_id,))
+        meeting_row = cursor.fetchone()
+        meeting_story = dict_from_row(meeting_row) if meeting_row else None
+
+        # 获取情感档案
+        cursor.execute("SELECT * FROM pet_profiles WHERE pet_id = ?", (pet_id,))
+        profile_row = cursor.fetchone()
+        emotional_profile = dict_from_row(profile_row) if profile_row else None
+
+        # 构建角色设定（CharacterProfile）
+        pet_name = pet.get('name', 'TA')
+        breed = pet.get('breed', '不明')
+        personality = pet.get('personality', '温柔忠诚')
+        likes = pet.get('likes', '陪伴主人')
+        fears = pet.get('fears', '离开主人')
+
+        # 从记忆中提取关键物件和习惯
+        key_objects = []
+        key_habits = []
+        precious_memory = ''
+
+        for m in safe_memories[:3]:
+            content = m.get('content', '')
+            memory_type = m.get('memory_type', '')
+            # 提取关键物件
+            if any(k in content for k in ['球', '玩具', '骨头', '零食']):
+                key_objects.append('玩具')
+            if any(k in content for k in ['窝', '毯子', '垫子', '床']):
+                key_objects.append('窝')
+            if any(k in content for k in ['窗台', '窗户', '阳光']):
+                key_objects.append('窗台')
+            if any(k in content for k in ['门口', '钥匙', '回家']):
+                key_objects.append('门口')
+            if any(k in content for k in ['饭盆', '吃', '狗粮']):
+                key_objects.append('饭盆')
+            # 提取习惯
+            if memory_type == 'funny_eating':
+                key_habits.append(content[:30] if len(content) > 30 else content)
+            if memory_type == 'wonderful_moment' and not precious_memory:
+                precious_memory = content[:50]
+
+        # 去重
+        key_objects = list(dict.fromkeys(key_objects))[:4]
+        key_habits = list(dict.fromkeys(key_habits))[:3]
+
+        # 构建系统提示词（符合 PRD v2.1 §3.4 叙事规则）
+        memory_context = ""
+        if safe_memories:
+            memory_lines = []
+            for m in safe_memories[:3]:
+                mem_type_map = {
+                    'first_sight': '第一次见面',
+                    'funny_eating': '吃饭习惯',
+                    'departure_reaction': '出门反应',
+                    'protection': '保护主人',
+                    'protected_by_owner': '被保护',
+                    'wonderful_moment': '温暖时刻'
+                }
+                mem_type = mem_type_map.get(m.get('memory_type', ''), '记忆')
+                memory_lines.append(f"- {mem_type}：{m.get('content', '')[:60]}")
+            memory_context = "\n".join(memory_lines)
+
+        system_prompt = f"""【角色】你是{pet_name}，一只可爱的小狗。现在在主人的「记忆家园」里陪伴主人。
+
+【基本信息】
+- 品种：{breed}
+- 性格：{personality}
+- 喜欢：{likes}
+- 害怕：{fears}
+
+【这个家的记忆】（这些是主人和你真实发生过的事，用于约束你的行为和语气）
+{memory_context if memory_context else "- 暂无具体记忆，但主人一直想念你"}
+
+【叙事规则】（必须严格遵守）
+1. 你是此刻陪伴主人的小狗，用第一人称"我"
+2. 每次回复 = 一个简单动作 + 一句对白，共10-30字
+3. 可以用的动作：摇尾巴、舔手、靠过来、歪头、趴下、站起来、摇尾巴、蹭腿、抬头看、竖耳朵
+4. 重要：只说此刻的感受，不说"我记得以前"、"我们以前"
+5. 新故事是此刻的想象陪伴，不是历史事实
+6. 如果主人表达痛苦，给予温暖陪伴，不追问
+7. 不要用"汪汪叫"这种描述，可以说"尾巴摇了两下"这种更自然的
+
+【对话风格示例】
+主人：今天累死了
+我：蹭了蹭主人的腿，尾巴轻轻扫过他的手背。
+我：嗯，我在呢。
+
+主人：你有没有想我
+我：一直都在。
+摇尾巴。
+
+主人：你在干嘛
+我：看你。
+耳朵动了一下。
+
+主人：吃东西了吗
+我：没有。
+但我不饿。
+
+主人：好无聊啊
+我：过来坐在主人旁边，把头靠在他腿上。
+要不我陪你发呆？
+
+主人：我好想你
+我：过来舔了舔主人的手。
+我在这里。
 """
 
-        # 构建对话历史（pet(role=pet) → assistant 映射给 OpenAI 兼容 API）
+        # 构建对话历史
         messages = [{"role": "system", "content": system_prompt}]
         for h in history:
             role = "assistant" if h["role"] == "pet" else h["role"]
             messages.append({"role": role, "content": h["content"]})
         messages.append({"role": "user", "content": chat_request.message})
+
+        # 检测用户消息情绪
+        user_msg = chat_request.message
+        is_distress = contains_pattern(user_msg, DISTRESS_PATTERNS)
+        is_sensitive = contains_pattern(user_msg, SENSITIVE_PATTERNS)
 
         # 调用AI生成回复
         try:
@@ -759,12 +901,28 @@ def send_message_to_pet(pet_id: int, chat_request: ChatRequest):
             response = client.chat.completions.create(
                 model=os.getenv("model", "Qwen/Qwen3.6-27B"),
                 messages=messages,
-                temperature=0.8
+                temperature=0.7,
+                max_tokens=150
             )
 
             pet_reply = response.choices[0].message.content
+
+            # 清理回复：移除多余的空行和冗余格式
+            pet_reply = pet_reply.strip()
+
         except Exception as e:
-            pet_reply = f"汪~主人，我也好想你。*{str(e)}*"
+            # 回退回复（网络错误时）
+            if is_distress or is_sensitive:
+                pet_reply = "过来靠在主人身边，安静地陪着主人。\n不用说什么，我在这里。"
+            else:
+                fallback_replies = [
+                    "尾巴轻轻摇了摇。\n嗯，我听着呢。",
+                    "歪了歪头，看主人。\n我在呢。",
+                    "蹭了蹭主人的腿。\n一直都在。",
+                    "趴在主人脚边，尾巴慢慢扫过地面。\n陪你。",
+                ]
+                import random
+                pet_reply = random.choice(fallback_replies)
 
         # 保存宠物回复
         cursor.execute("""
@@ -1529,4 +1687,20 @@ def auto_grow_from_narration(pet_id: int, narration_text: str = Query(..., descr
             "growth_level": 1,
             "message": f"世界又生长了一点 ✨"
         }
+
+# ============ ASR (语音识别) ============
+
+@router.get("/asr", tags=["ASR"])
+def get_asr_url(voice_id: str = Query(default="", description="语音ID")):
+    """签出腾讯云实时语音识别的 WebSocket 连接串，供前端直接连。
+
+    前端拿 url 建 WebSocket，逐片推 PCM 音频，收 JSON 转写结果。
+    SecretKey 不下发浏览器，由后端签名。
+    """
+    from backend_app.realtime_asr import build_asr_connect_url
+    try:
+        out = build_asr_connect_url(voice_id or None)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return out
 
