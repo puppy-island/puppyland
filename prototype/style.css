@@ -145,6 +145,9 @@ body{
   color:#8A5A2E;
   display:grid; place-items:center;
   touch-action:none;
+  /* 长按时不要触发选中/系统菜单/拖拽，这些都会打断手势 */
+  -webkit-user-select:none; user-select:none;
+  -webkit-touch-callout:none; -webkit-tap-highlight-color:transparent;
   transition:transform .25s var(--ease), box-shadow .3s var(--ease);
   animation:breathe 3.4s ease-in-out infinite;
 }
@@ -733,6 +736,10 @@ body{
   position:absolute; inset:0; z-index:40; display:grid; place-items:center;
   background:rgba(45,36,30,.5); backdrop-filter:blur(3px);
   animation:fade .3s var(--ease);
+  /* 纯提示层，不能吃掉指针事件：否则录音一开始浮层就盖在爪印上，
+     松手事件落到浮层上，长按录音永远收不到 pointerup。 */
+  pointer-events:none;
+  touch-action:none;
 }
 .rec-overlay[hidden]{ display:none; }
 @keyframes fade{ from{opacity:0} to{opacity:1} }
