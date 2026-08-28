@@ -364,6 +364,21 @@
 
   /* 录音浮层 */
   var recOverlay = $('#recOverlay');
+  var MAX_REC_MS = 60000;   // 兜底：录满 60 秒自动收尾，避免任何情况下卡在录音态
+
+  /* 麦克风权限状态。首次授权时浏览器会弹原生权限弹窗，弹窗期间页面收不到 pointerup，
+     若那时已经在录音就会「按下去松不开」。所以第一次按下只用来申请权限，
+     拿到授权之后才允许进入长按录音。 */
+  var micGranted = false;
+  if (navigator.permissions && navigator.permissions.query) {
+    try {
+      navigator.permissions.query({ name: 'microphone' }).then(function (st) {
+        micGranted = (st.state === 'granted');
+        st.onchange = function () { micGranted = (st.state === 'granted'); };
+      }, function () {});
+    } catch (e) {}   // Safari 等不支持 microphone 查询，走首次申请流程
+  }
+
   var wave = $('#wave');
   for (var w = 0; w < 11; w++) {
     var bar = document.createElement('i');
@@ -519,6 +534,9 @@
     var mediaRecorder = null;
     var audioChunks = [];
     var ended = false; // end() 是否已在 recorder 就绪前被调用
+    var activePointer = null; // 按住的 pointerId，用于忽略其它手指的松手
+    var maxTimer = null;      // 录满自动收尾
+    var requesting = false;   // 正在申请麦克风权限
 
     function releaseMic() {
       if (mediaRecorder && mediaRecorder.stream) {
@@ -527,15 +545,92 @@
       mediaRecorder = null;
     }
 
+    /* 松手监听必须挂在 window 上（capture 阶段）：
+       start() 会立刻展开覆盖全屏的录音浮层，指针下方的元素随即变成浮层，
+       只监听 btn 的 pointerup 就再也收不到松手事件 —— 这正是「松不开」的原因。
+       同时兜住切后台、窗口失焦这类拿不到 pointerup 的情况。 */
+    function onRelease(e) {
+      if (e && e.pointerId != null && activePointer != null && e.pointerId !== activePointer) return;
+      end();
+    }
+    function onHide() { if (document.hidden) end(); }
+    // 只认窗口自身失焦；捕获阶段也会收到子元素的 blur，那些不该结束录音
+    function onWinBlur(e) { if (e.target === window) end(); }
+
+    function watchRelease() {
+      window.addEventListener('pointerup', onRelease, true);
+      window.addEventListener('pointercancel', onRelease, true);
+      window.addEventListener('blur', onWinBlur, true);
+      document.addEventListener('visibilitychange', onHide, true);
+    }
+    function unwatchRelease() {
+      window.removeEventListener('pointerup', onRelease, true);
+      window.removeEventListener('pointercancel', onRelease, true);
+      window.removeEventListener('blur', onWinBlur, true);
+      document.removeEventListener('visibilitychange', onHide, true);
+    }
+
+    function resetHold() {
+      btn.classList.remove('is-holding');
+      activePointer = null;
+      if (maxTimer) { clearTimeout(maxTimer); maxTimer = null; }
+      unwatchRelease();
+    }
+
     function start(e) {
       e.preventDefault();
-      if (t0) return;            // 已在录音，忽略重复按下
+      if (t0 || requesting) return;   // 已在录音或正在申请权限，忽略重复按下
+      // 浮层还在（录音中或转写中）就不接受新的按下：浮层已不吃指针事件，这里补上拦截
+      if (!recOverlay.hidden) return;
+
+      /* 首次使用：这一下先申请权限，不直接进入录音。
+         原生权限弹窗会吞掉 pointerup，若此刻已在录音就永远收不到松手。 */
+      if (!micGranted) {
+        requesting = true;
+        var askedAt = Date.now();
+        var releasedDuringAsk = false;
+        var askRelease = function () { releasedDuringAsk = true; };
+        window.addEventListener('pointerup', askRelease, true);
+        window.addEventListener('pointercancel', askRelease, true);
+        label.textContent = '请允许麦克风权限…';
+
+        navigator.mediaDevices.getUserMedia({ audio: true })
+          .then(function (stream) {
+            stream.getTracks().forEach(function (t) { t.stop(); }); // 只为拿授权，立即释放
+            window.removeEventListener('pointerup', askRelease, true);
+            window.removeEventListener('pointercancel', askRelease, true);
+            micGranted = true;
+            requesting = false;
+            /* 秒回说明没弹窗（已授权过），松手事件可信：手指还按着就接着录。
+               弹过窗的情况下 pointerup 不可信，让用户重新按一次。 */
+            if (Date.now() - askedAt < 300 && !releasedDuringAsk) {
+              label.textContent = opt.hold || '按住，说给 TA 听';
+              start({ preventDefault: function () {}, pointerId: e.pointerId });
+            } else {
+              label.textContent = '可以了，按住说给 TA 听';
+            }
+          })
+          .catch(function () {
+            window.removeEventListener('pointerup', askRelease, true);
+            window.removeEventListener('pointercancel', askRelease, true);
+            requesting = false;
+            label.textContent = '需要麦克风权限，或改用文字';
+          });
+        return;
+      }
+
+      activePointer = (e && e.pointerId != null) ? e.pointerId : null;
       t0 = Date.now();
       audioChunks = [];
       ended = false;
       btn.classList.add('is-holding');
       recOverlay.hidden = false;
       $('#recTip').textContent = '松开结束';
+      watchRelease();
+      maxTimer = setTimeout(function () {
+        $('#recTip').textContent = '已录满，正在收尾…';
+        end();
+      }, MAX_REC_MS);
 
       // 开始录音
       navigator.mediaDevices.getUserMedia({ audio: true })
@@ -557,24 +652,25 @@
         .catch(function(err){
           t0 = null;
           ended = true;
-          btn.classList.remove('is-holding');
+          resetHold();
           recOverlay.hidden = true;
-          label.textContent = '请允许麦克风权限';
+          label.textContent = '需要麦克风权限，或改用文字';
         });
     }
 
     function end() {
       if (!t0) return;
       var dur = Date.now() - t0; t0 = null;
-      btn.classList.remove('is-holding');
+      resetHold();
 
       if (ended) { recOverlay.hidden = true; releaseMic(); return; } // getUserMedia 未返回，由其自行清理
       ended = true;
 
       var recorder = mediaRecorder;
       if (!recorder || recorder.state === 'inactive') {
+        // recorder 还没就绪就松手了：可能按得太短，也可能麦克风启动慢
         recOverlay.hidden = true;
-        label.textContent = '太短了，再按久一点';
+        label.textContent = dur < 550 ? '太短了，再按久一点' : '麦克风还没就绪，再按一次';
         releaseMic();
         return;
       }
@@ -631,11 +727,17 @@
       try { recorder.stop(); } catch(e) { recOverlay.hidden = true; releaseMic(); }
     }
 
-    // 同时支持鼠标（桌面）与触摸（移动）
+    // pointerdown 同时覆盖鼠标和触摸；松手由 window 上的监听负责（见 watchRelease）
     btn.addEventListener('pointerdown', start);
-    btn.addEventListener('pointerup', end);
-    btn.addEventListener('pointercancel', end);
-    btn.addEventListener('touchstart', function(e){ e.preventDefault(); }, { passive: false });
+    // 触摸端长按会弹出系统菜单/选中文字，进而打断手势
+    btn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+    // 键盘可达：空格/回车按住录音，松开结束
+    btn.addEventListener('keydown', function (e) {
+      if ((e.key === ' ' || e.key === 'Enter') && !e.repeat) { e.preventDefault(); start(e); }
+    });
+    btn.addEventListener('keyup', function (e) {
+      if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); end(); }
+    });
     alt.addEventListener('click', function () { editor(''); });
 
     // 发送前编辑
