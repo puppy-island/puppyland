@@ -364,6 +364,21 @@
 
   /* 录音浮层 */
   var recOverlay = $('#recOverlay');
+  var MAX_REC_MS = 60000;   // 兜底：录满 60 秒自动收尾，避免任何情况下卡在录音态
+
+  /* 麦克风权限状态。首次授权时浏览器会弹原生权限弹窗，弹窗期间页面收不到 pointerup，
+     若那时已经在录音就会「按下去松不开」。所以第一次按下只用来申请权限，
+     拿到授权之后才允许进入长按录音。 */
+  var micGranted = false;
+  if (navigator.permissions && navigator.permissions.query) {
+    try {
+      navigator.permissions.query({ name: 'microphone' }).then(function (st) {
+        micGranted = (st.state === 'granted');
+        st.onchange = function () { micGranted = (st.state === 'granted'); };
+      }, function () {});
+    } catch (e) {}   // Safari 等不支持 microphone 查询，走首次申请流程
+  }
+
   var wave = $('#wave');
   for (var w = 0; w < 11; w++) {
     var bar = document.createElement('i');
@@ -371,8 +386,118 @@
     wave.appendChild(bar);
   }
 
-  /*  采集组件：按住发光爪印说话 → Mock 转写 → 发送前可编辑 → 失败可退化为文字
-      对应 PRD「语音支持录音、Mock ASR、发送前编辑；失败退化为文字」 */
+  /*  采集组件：按住发光爪印说话 → 腾讯云 ASR 转写 → 发送前可编辑 → 失败退化为文字
+      对应 PRD「语音支持录音、腾讯云 ASR、发送前编辑；失败退化为文字」 */
+
+  // 腾讯云 ASR WebSocket 实时识别
+  /* 把 MediaRecorder 的 webm blob 解码 + 重采样为 16kHz/16bit/单声道裸 PCM。
+     腾讯云 asr/v2 只吃裸 PCM，不认 webm 容器。 */
+  function blobToPcm16k(blob) {
+    return new Promise(function(resolve, reject) {
+      var reader = new FileReader();
+      reader.onerror = function(){ reject(new Error('读取录音失败')); };
+      reader.onload = function(ev) {
+        var AC = window.AudioContext || window.webkitAudioContext;
+        var ac = new AC();
+        ac.decodeAudioData(ev.target.result, function(buffer) {
+          ac.close();
+          // 用 OfflineAudioContext 重采样到 16kHz 单声道
+          var frames = Math.ceil(buffer.duration * 16000);
+          var OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+          var off = new OAC(1, frames, 16000);
+          var src = off.createBufferSource();
+          src.buffer = buffer;
+          src.connect(off.destination);
+          src.start();
+          off.startRendering().then(function(rendered) {
+            var f32 = rendered.getChannelData(0);
+            var pcm = new DataView(new ArrayBuffer(f32.length * 2));
+            for (var i = 0; i < f32.length; i++) {
+              var s = Math.max(-1, Math.min(1, f32[i]));
+              pcm.setInt16(i * 2, s * 0x7fff, true); // little-endian
+            }
+            resolve(pcm.buffer);
+          }).catch(reject);
+        }, function(){ ac.close(); reject(new Error('解码录音失败')); });
+      };
+      reader.readAsArrayBuffer(blob);
+    });
+  }
+
+  function recognizeByASR(audioBlob, onResult, onError) {
+    var slices = [];   // 按 result.index 存各切片文本
+    var settled = false;
+
+    function joinText() { return slices.join('').trim(); }
+    function fail(msg) { if (!settled) { settled = true; onError(msg); } }
+
+    Promise.all([
+      fetch(API_BASE + '/asr?' + Date.now()).then(function(r){ return r.json(); }),
+      blobToPcm16k(audioBlob)
+    ]).then(function(res) {
+      var data = res[0], pcm = res[1];
+      if (!data.url) { fail('获取ASR连接失败'); return; }
+      var ws = new WebSocket(data.url);
+      ws.binaryType = 'arraybuffer';
+      // 音频按实时速率上传（200ms/片），超时须覆盖录音时长本身再留 10s 余量
+      var uploadMs = (pcm.byteLength / 6400) * 200;
+      var timeout = setTimeout(function(){
+        try { ws.close(); } catch(e) {}
+        if (joinText()) { settled = true; onResult(joinText(), true); }
+        else fail('识别超时');
+      }, uploadMs + 10000);
+
+      ws.onopen = function() {
+        // 200ms @16kHz/16bit = 6400 bytes，逐片推裸 PCM
+        var CHUNK = 6400, off = 0;
+        (function sendNext() {
+          if (settled || ws.readyState !== 1) return;
+          if (off >= pcm.byteLength) {
+            try { ws.send(JSON.stringify({ type: 'end' })); } catch(e) {}
+            return;
+          }
+          try {
+            ws.send(pcm.slice(off, Math.min(off + CHUNK, pcm.byteLength)));
+          } catch(e) { fail('发送音频失败'); return; }
+          off += CHUNK;
+          setTimeout(sendNext, 200);
+        })();
+      };
+
+      ws.onmessage = function(ev) {
+        var msg;
+        try { msg = JSON.parse(ev.data); } catch(e) { return; }
+        if (msg.code !== 0) { clearTimeout(timeout); try { ws.close(); } catch(e) {} fail(msg.message || 'ASR识别失败'); return; }
+
+        var r = msg.result;
+        if (r && typeof r.voice_text_str === 'string') {
+          slices[r.index || 0] = r.voice_text_str;      // slice_type 0/1 是中间态，2 为稳定
+          if (!settled) onResult(joinText(), false);     // 实时回显
+        }
+        if (msg.final === 1) {                          // 识别结束
+          clearTimeout(timeout);
+          try { ws.close(); } catch(e) {}
+          var text = joinText();
+          if (!settled) {
+            settled = true;
+            if (text) onResult(text, true); else onError('没听清，再说一次');
+          }
+        }
+      };
+
+      ws.onerror = function() { clearTimeout(timeout); fail('ASR连接失败'); };
+      ws.onclose = function() {
+        clearTimeout(timeout);
+        // 服务端没回 final 就断开：有文本也当成功
+        if (!settled) {
+          var text = joinText();
+          if (text) { settled = true; onResult(text, true); }
+          else fail('连接中断');
+        }
+      };
+    }).catch(function(e) { fail((e && e.message) || '网络错误'); });
+  }
+
   function capture(slot, opt) {
     slot.innerHTML = '';
     var col = document.createElement('div');
@@ -405,27 +530,214 @@
       col.appendChild(sk);
     }
 
-    var t0 = 0;
+    var t0 = null; // 开始时间，null 表示未在录音
+    var mediaRecorder = null;
+    var audioChunks = [];
+    var ended = false; // end() 是否已在 recorder 就绪前被调用
+    var activePointer = null; // 按住的 pointerId，用于忽略其它手指的松手
+    var maxTimer = null;      // 录满自动收尾
+    var requesting = false;   // 正在申请麦克风权限
+
+    function releaseMic() {
+      if (mediaRecorder && mediaRecorder.stream) {
+        try { mediaRecorder.stream.getTracks().forEach(function(t){ t.stop(); }); } catch(e) {}
+      }
+      mediaRecorder = null;
+    }
+
+    /* 松手监听必须挂在 window 上（capture 阶段）：
+       start() 会立刻展开覆盖全屏的录音浮层，指针下方的元素随即变成浮层，
+       只监听 btn 的 pointerup 就再也收不到松手事件 —— 这正是「松不开」的原因。
+       同时兜住切后台、窗口失焦这类拿不到 pointerup 的情况。 */
+    function onRelease(e) {
+      if (e && e.pointerId != null && activePointer != null && e.pointerId !== activePointer) return;
+      end();
+    }
+    function onHide() { if (document.hidden) end(); }
+    // 只认窗口自身失焦；捕获阶段也会收到子元素的 blur，那些不该结束录音
+    function onWinBlur(e) { if (e.target === window) end(); }
+
+    function watchRelease() {
+      window.addEventListener('pointerup', onRelease, true);
+      window.addEventListener('pointercancel', onRelease, true);
+      window.addEventListener('blur', onWinBlur, true);
+      document.addEventListener('visibilitychange', onHide, true);
+    }
+    function unwatchRelease() {
+      window.removeEventListener('pointerup', onRelease, true);
+      window.removeEventListener('pointercancel', onRelease, true);
+      window.removeEventListener('blur', onWinBlur, true);
+      document.removeEventListener('visibilitychange', onHide, true);
+    }
+
+    function resetHold() {
+      btn.classList.remove('is-holding');
+      activePointer = null;
+      if (maxTimer) { clearTimeout(maxTimer); maxTimer = null; }
+      unwatchRelease();
+    }
+
     function start(e) {
       e.preventDefault();
+      if (t0 || requesting) return;   // 已在录音或正在申请权限，忽略重复按下
+      // 浮层还在（录音中或转写中）就不接受新的按下：浮层已不吃指针事件，这里补上拦截
+      if (!recOverlay.hidden) return;
+
+      /* 首次使用：这一下先申请权限，不直接进入录音。
+         原生权限弹窗会吞掉 pointerup，若此刻已在录音就永远收不到松手。 */
+      if (!micGranted) {
+        requesting = true;
+        var askedAt = Date.now();
+        var releasedDuringAsk = false;
+        var askRelease = function () { releasedDuringAsk = true; };
+        window.addEventListener('pointerup', askRelease, true);
+        window.addEventListener('pointercancel', askRelease, true);
+        label.textContent = '请允许麦克风权限…';
+
+        navigator.mediaDevices.getUserMedia({ audio: true })
+          .then(function (stream) {
+            stream.getTracks().forEach(function (t) { t.stop(); }); // 只为拿授权，立即释放
+            window.removeEventListener('pointerup', askRelease, true);
+            window.removeEventListener('pointercancel', askRelease, true);
+            micGranted = true;
+            requesting = false;
+            /* 秒回说明没弹窗（已授权过），松手事件可信：手指还按着就接着录。
+               弹过窗的情况下 pointerup 不可信，让用户重新按一次。 */
+            if (Date.now() - askedAt < 300 && !releasedDuringAsk) {
+              label.textContent = opt.hold || '按住，说给 TA 听';
+              start({ preventDefault: function () {}, pointerId: e.pointerId });
+            } else {
+              label.textContent = '可以了，按住说给 TA 听';
+            }
+          })
+          .catch(function () {
+            window.removeEventListener('pointerup', askRelease, true);
+            window.removeEventListener('pointercancel', askRelease, true);
+            requesting = false;
+            label.textContent = '需要麦克风权限，或改用文字';
+          });
+        return;
+      }
+
+      activePointer = (e && e.pointerId != null) ? e.pointerId : null;
       t0 = Date.now();
+      audioChunks = [];
+      ended = false;
       btn.classList.add('is-holding');
       recOverlay.hidden = false;
       $('#recTip').textContent = '松开结束';
+      watchRelease();
+      maxTimer = setTimeout(function () {
+        $('#recTip').textContent = '已录满，正在收尾…';
+        end();
+      }, MAX_REC_MS);
+
+      // 开始录音
+      navigator.mediaDevices.getUserMedia({ audio: true })
+        .then(function(stream) {
+          if (ended) {
+            // end() 已在 getUserMedia 完成前被调用，直接清理
+            stream.getTracks().forEach(function(t){ t.stop(); });
+            return;
+          }
+          var mime = MediaRecorder.isTypeSupported('audio/webm')
+            ? 'audio/webm'
+            : (MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : '');
+          mediaRecorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+          mediaRecorder.ondataavailable = function(ev) {
+            if (ev.data.size > 0) audioChunks.push(ev.data);
+          };
+          mediaRecorder.start();
+        })
+        .catch(function(err){
+          t0 = null;
+          ended = true;
+          resetHold();
+          recOverlay.hidden = true;
+          label.textContent = '需要麦克风权限，或改用文字';
+        });
     }
+
     function end() {
       if (!t0) return;
-      var dur = Date.now() - t0; t0 = 0;
-      btn.classList.remove('is-holding');
-      recOverlay.hidden = true;
-      if (dur < 550) { label.textContent = '太短了，再按久一点'; return; }
-      $('#recTip').textContent = '正在转写…';
-      editor(mockASR(opt.asr));
+      var dur = Date.now() - t0; t0 = null;
+      resetHold();
+
+      if (ended) { recOverlay.hidden = true; releaseMic(); return; } // getUserMedia 未返回，由其自行清理
+      ended = true;
+
+      var recorder = mediaRecorder;
+      if (!recorder || recorder.state === 'inactive') {
+        // recorder 还没就绪就松手了：可能按得太短，也可能麦克风启动慢
+        recOverlay.hidden = true;
+        label.textContent = dur < 550 ? '太短了，再按久一点' : '麦克风还没就绪，再按一次';
+        releaseMic();
+        return;
+      }
+
+      if (dur < 550) {
+        // 太短：停掉录音并释放麦克风，不发起识别
+        try { recorder.stop(); } catch(e) {}
+        recOverlay.hidden = true;
+        releaseMic();
+        label.textContent = '太短了，再按久一点';
+        return;
+      }
+
+      // 等 recorder 完全停止，chunk 才收集完整；转写期间保留浮层做提示
+      recorder.onstop = function() {
+        releaseMic();
+        $('#recTip').textContent = '正在转写…';
+
+        var blob = new Blob(audioChunks, { type: recorder.mimeType || 'audio/webm' });
+        if (!blob.size) {
+          recOverlay.hidden = true;
+          label.textContent = '没录到声音，再试一次';
+          return;
+        }
+
+        var retried = false;
+        function tryASR() {
+          recognizeByASR(blob, function(text, isFinal) {
+            if (!text) return;
+            if (isFinal) {
+              // 最终结果：收起浮层，把文字填进狗爪旁的输入框
+              recOverlay.hidden = true;
+              editor(text);
+            } else {
+              // 中间结果：在浮层里实时回显
+              $('#recTip').textContent = text;
+            }
+          }, function(err) {
+            if (!retried) {
+              retried = true;
+              $('#recTip').textContent = '转写失败，重试中…';
+              setTimeout(tryASR, 800);
+              return;
+            }
+            // 两次都失败：收起浮层，回退成可编辑的空输入框，让用户直接打字
+            recOverlay.hidden = true;
+            label.textContent = err || '没听清，可以直接打字';
+            editor('');
+          });
+        }
+        tryASR();
+      };
+
+      try { recorder.stop(); } catch(e) { recOverlay.hidden = true; releaseMic(); }
     }
+
+    // pointerdown 同时覆盖鼠标和触摸；松手由 window 上的监听负责（见 watchRelease）
     btn.addEventListener('pointerdown', start);
-    btn.addEventListener('pointerup', end);
-    btn.addEventListener('pointerleave', end);
-    btn.addEventListener('pointercancel', end);
+    // 触摸端长按会弹出系统菜单/选中文字，进而打断手势
+    btn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+    // 键盘可达：空格/回车按住录音，松开结束
+    btn.addEventListener('keydown', function (e) {
+      if ((e.key === ' ' || e.key === 'Enter') && !e.repeat) { e.preventDefault(); start(e); }
+    });
+    btn.addEventListener('keyup', function (e) {
+      if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); end(); }
+    });
     alt.addEventListener('click', function () { editor(''); });
 
     // 发送前编辑
