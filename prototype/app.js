@@ -16,6 +16,9 @@
      1. 状态（对应 PRD §7 数据与状态）
      ──────────────────────────────────────────────────────────────────── */
   var KEY = 'memoryhome.guest.v1';   // Guest Session：当前设备永久保存
+  // 后端地址可通过 window.MEMORY_HOME_API 覆盖；本地开发默认 FastAPI 端口 8000。
+  var API_BASE = (window.MEMORY_HOME_API || 'http://localhost:8000/api/v1').replace(/\/$/, '');
+  var API_ORIGIN = API_BASE.replace(/\/api\/v1\/?$/, '');
 
   var S = {
     scene: 'intro',
@@ -41,6 +44,7 @@
     story: {                        // StoryState：唯一活跃的想象性剧情
       scene: 'home', beat: 0, petState: 'idle', used: [], mood: '灯还亮着', homeLightsOn: true
     },
+    backendPetId: null,
     conversations: [],              // 当天对话摘要，用于生成小狗来信（Guest Session）
     dailyLetters: []
   };
@@ -66,6 +70,107 @@
   function reset() {
     try { localStorage.removeItem(KEY); } catch (e) {}
     location.reload();
+  }
+
+  function apiRequest(path, options) {
+    options = options || {};
+    var controller = window.AbortController ? new AbortController() : null;
+    var timer = controller ? setTimeout(function () { controller.abort(); }, options.timeout || 8000) : null;
+    var headers = options.headers || {};
+    if (options.body && !(options.body instanceof FormData) && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+    var req = Object.assign({}, options, { headers: headers });
+    if (controller) req.signal = controller.signal;
+    return fetch(API_BASE + path, req).then(function (res) {
+      if (!res.ok) throw new Error('API ' + res.status);
+      return res.json();
+    }).finally(function () { if (timer) clearTimeout(timer); });
+  }
+
+  function publicAssetUrl(url) {
+    if (!url) return '';
+    return /^https?:\/\//i.test(url) ? url : API_ORIGIN + (url.charAt(0) === '/' ? url : '/' + url);
+  }
+
+  async function ensureBackendPet() {
+    if (S.backendPetId) return S.backendPetId;
+    var voice = S.journey.voiceDescription || '';
+    try {
+      var pet = await apiRequest('/pets', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: S.petName || 'TA',
+          personality: voice || null,
+          likes: voice || null,
+          avatar_url: null
+        })
+      });
+      S.backendPetId = pet.id;
+      save();
+      return pet.id;
+    } catch (e) {
+      // 原型仍可离线演示，后端不可用时保留本地状态。
+      return null;
+    }
+  }
+
+  async function syncPetPhoto(file) {
+    if (!file) return null;
+    try {
+      var form = new FormData(); form.append('file', file);
+      var uploaded = await apiRequest('/upload-image', { method: 'POST', body: form, timeout: 12000 });
+      var url = publicAssetUrl(uploaded.url);
+      if (S.backendPetId) {
+        await apiRequest('/pets/' + S.backendPetId, { method: 'PUT', body: JSON.stringify({ avatar_url: url }) });
+      }
+      S.journey.petReferenceImage = url;
+      save();
+      return url;
+    } catch (e) { return null; }
+  }
+
+  var MEMORY_TYPE_MAP = {
+    first_meeting: 'first_sight', first_home: 'wonderful_moment', habit: 'funny_eating',
+    favorite_activity: 'wonderful_moment', happiest_memory: 'wonderful_moment'
+  };
+
+  async function persistJourneyMemory(node, narrative) {
+    if (!S.backendPetId) return null;
+    var content = [S.journey.voiceDescription, narrative.reveal].filter(Boolean).join('；');
+    try {
+      return await apiRequest('/pets/' + S.backendPetId + '/narrations/auto-grow?narration_text=' + encodeURIComponent(node.title + '：' + content), {
+        method: 'POST', timeout: 7000
+      });
+    } catch (e) {
+      try {
+        return await apiRequest('/pets/' + S.backendPetId + '/memories', {
+          method: 'POST', body: JSON.stringify({ memory_type: MEMORY_TYPE_MAP[node.id] || 'wonderful_moment', title: narrative.title, content: content || narrative.reveal })
+        });
+      } catch (ignored) { return null; }
+    }
+  }
+
+  async function syncHomeConfig() {
+    if (!S.backendPetId) return;
+    try {
+      var profile = await apiRequest('/pets/' + S.backendPetId + '/profile', { timeout: 7000 });
+      var items = profile.virtual_home_items || [];
+      S.journey.homeConfig = {
+        theme: 'warm_nature', lighting: 'sunny',
+        assets: items.map(function (item) { return item.item_type || item.item_name; }),
+        memoryCount: (profile.memories || []).length
+      };
+      save();
+    } catch (e) {}
+  }
+
+  async function backendChat(text) {
+    if (!S.backendPetId) return null;
+    try {
+      var reply = await apiRequest('/pets/' + S.backendPetId + '/chat', {
+        method: 'POST', body: JSON.stringify({ message: text }), timeout: 12000
+      });
+      return reply && reply.content ? reply.content : null;
+    } catch (e) { return null; }
   }
 
   var POSE = {
@@ -321,7 +426,11 @@
   $$('.scene').forEach(function (el) { scenes[el.dataset.scene] = el; });
 
   function goto(name) {
-    Object.keys(scenes).forEach(function (k) { scenes[k].classList.toggle('is-active', k === name); });
+    Object.keys(scenes).forEach(function (k) {
+      var isTarget = k === name;
+      scenes[k].classList.toggle('is-active', isTarget);
+      scenes[k].classList.toggle('is-leaving', !isTarget);
+    });
     S.scene = name; save();
     if (SCENE_INIT[name]) SCENE_INIT[name]();
   }
@@ -434,11 +543,17 @@
     $('#journeyCopy').textContent = narrative.reveal;
     journeyProgress(); journeyWorldLevel(); save();
     journeyWorld.classList.add('is-processing');
-    setTimeout(function () {
+    setTimeout(async function () {
       journeyWorld.classList.remove('is-processing');
       var m = addMemory('journey:' + node.id, narrative.title, node.priority);
       m.summary = narrative.title; m.narrative = narrative.reveal; m.memoryType = node.id; m.emotion = node.id === 'happiest_memory' ? 'joy' : 'warm';
       m.petTraits = S.profile.traits.slice(); m.petBehaviors = S.profile.habits.slice(); m.homeAssets = [node.id];
+      var remote = await persistJourneyMemory(node, narrative);
+      if (remote) {
+        var remoteMemory = remote.created_memory || remote;
+        if (remoteMemory && remoteMemory.id) m.backendId = remoteMemory.id;
+        if (remote.narration && remote.narration.ai_response) m.aiResponse = remote.narration.ai_response;
+      }
       S.journey.memories.push(m);
       S.journey.currentMemoryIndex += 1;
       S.journey.petCompletion = [0.25, 0.4, 0.55, 0.7, 0.85, 1][Math.min(S.journey.currentMemoryIndex, 5)];
@@ -483,20 +598,23 @@
         if (voice.disabled) return;
         voice.disabled = true; voice.classList.add('is-listening');
         $('#journeyVoiceLabel').textContent = '正在听…松开后，TA 会慢慢出现';
-        setTimeout(function () {
-        S.petName = S.petName || mockASR('name');
-        S.journey.voiceDescription = mockASR('meet');
-        S.journey.petImage = 'assets/pet-idle.webp';
-        S.hasPhoto = true;
-        S.journey.stage = 'PET_CONFIRM'; setDetail(0.35); journeyWorld.classList.remove('is-running'); journeyCardReset(); journeyConfirm.hidden = false;
-        $('#journeyKicker').textContent = ''; $('#journeyTitle').textContent = '我想起来啦'; $('#journeyCopy').textContent = '我是这样的一只小狗对嘛？';
-        journeyProgress(); journeyWorldLevel(); save();
+        setTimeout(async function () {
+          S.petName = S.petName || mockASR('name');
+          S.journey.voiceDescription = mockASR('meet');
+          S.journey.petImage = 'assets/pet-idle.webp';
+          S.hasPhoto = true;
+          interpret(S.journey.voiceDescription);
+          await ensureBackendPet();
+          S.journey.stage = 'PET_CONFIRM'; setDetail(0.35); journeyWorld.classList.remove('is-running'); journeyCardReset(); journeyConfirm.hidden = false;
+          $('#journeyKicker').textContent = ''; $('#journeyTitle').textContent = '我想起来啦'; $('#journeyCopy').textContent = '我是这样的一只小狗对嘛？';
+          journeyProgress(); journeyWorldLevel(); save();
+          voice.disabled = false; voice.classList.remove('is-listening');
         }, 1100);
       });
       $('#journeyRegeneratePhoto').addEventListener('change', function () {
         var file = this.files && this.files[0]; if (!file) return;
         var reader = new FileReader();
-        reader.onload = function () {
+        reader.onload = async function () {
           S.journey.petReferenceImage = reader.result;
           S.journey.regenerationPrompt = [S.journey.voiceDescription, '根据补充照片校准外形'].filter(Boolean).join('；');
           S.journey.isRegenerating = true;
@@ -504,6 +622,7 @@
           pet.classList.add('is-regenerating');
           $('#journeyCopy').textContent = '正在根据照片和描述重新生成……';
           $('#journeyConfirmBtn').disabled = true;
+          await syncPetPhoto(file);
           setTimeout(function () {
             // Mock 生成：真实接入时将 regenerationPrompt 与参考图传给生图服务。
             var voice = S.journey.voiceDescription || '';
@@ -572,6 +691,7 @@
     say(n, '<span class="dim">脚印一枚一枚，走回同一个地方。</span>', 500);
     say(n, '<span class="dim">墙立起来了，灯挂上去了。</span>', 3200);
     say(n, '家已经在这里了。', 5400);
+    syncHomeConfig();
     setTimeout(function () { if (S.scene === 'weave') goto('home'); }, 7400);
   }
 
@@ -846,6 +966,15 @@
     interpret(text);
     var t3 = typing(); await sleep(850); t3.remove();
     var b3 = document.createElement('div'); b3.className = 'beat'; thread.appendChild(b3);
+    var remoteReply = await backendChat(text);
+    if (remoteReply) {
+      b3.appendChild(line('line-act', N() + '看着你，耳朵轻轻动了一下。'));
+      await sleep(500);
+      b3.appendChild(line('line-say', remoteReply));
+      if (follow) scrollEnd(true);
+      busy = false; save();
+      return;
+    }
     var reacts = [
       { act: N() + '抬头看着你，尾巴在地板上扫了两下。', say: '好呀。你说什么我都听。' },
       { act: N() + '往你这边挪了挪，整个身子贴上来。', say: '我在听，你继续说。' },
