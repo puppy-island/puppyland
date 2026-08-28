@@ -1493,7 +1493,7 @@ def generate_journey(pet_id: int):
             # 降级处理
             cursor.execute("""
                 INSERT INTO journey_records (pet_id, journey_type, title, content, next_suggestion)
-                VALUES (?, 'continuation', '新的旅程', '和ta一起，继续这段温暖的旅程', NULL, '想继续听下去吗？')
+                VALUES (?, 'continuation', '新的旅程', '和ta一起，继续这段温暖的旅程', '想继续听下去吗？')
             """, (pet_id,))
             journey_id = cursor.lastrowid
             cursor.execute("SELECT * FROM journey_records WHERE id = ?", (journey_id,))
@@ -1703,4 +1703,3 @@ def get_asr_url(voice_id: str = Query(default="", description="语音ID")):
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return out
-
