@@ -51,55 +51,38 @@
       <button class="skip" id="skipIntro" type="button">跳过</button>
     </section>
 
-    <!-- ── 场景 1：门口第一次相遇 ────────────────────── -->
-    <section class="scene" data-scene="s1" aria-label="第一次相遇">
-      <div class="world room" id="room1">
-        <div class="light-shaft" aria-hidden="true"></div>
-        <div class="obj obj-window is-off" data-obj="window" aria-hidden="true"><i></i></div>
-        <div class="obj obj-table is-off" data-obj="table" aria-hidden="true"><b></b><u></u><u class="r"></u></div>
-        <div class="obj obj-box is-off" data-obj="box" aria-hidden="true"></div>
-        <div class="pet-slot" id="pet1">
-          <img class="pet" src="assets/pet-idle.webp" alt="一只轮廓还很模糊的小狗">
+    <!-- ── 第二阶段：连续叙事式记忆旅程 ───────────────── -->
+    <section class="scene journey-page" data-scene="journey" aria-label="记忆旅程">
+      <div class="journey-world" id="journeyWorld">
+        <div class="journey-sky"></div>
+        <div class="journey-mountains"></div>
+        <div class="journey-ground"></div>
+        <div class="journey-road"></div>
+        <div class="journey-bridge" aria-hidden="true"><span></span></div>
+        <div class="journey-particles" id="journeyParticles"></div>
+        <div class="pet-slot journey-pet" id="journeyPet">
+          <img class="pet" src="assets/pet-idle.webp" alt="正在找回自己的小狗">
         </div>
-        <div class="trail" id="trail1" aria-hidden="true"></div>
       </div>
-      <div class="dock">
-        <p class="narration serif" id="n1"></p>
-        <div class="slot" id="a1"></div>
-      </div>
-    </section>
-
-    <!-- ── 场景 2：普通的一天 ───────────────────────── -->
-    <section class="scene" data-scene="s2" aria-label="普通的一天">
-      <div class="world room daylight" id="room2">
-        <div class="sky" aria-hidden="true"></div>
-        <div class="light-shaft warm" aria-hidden="true"></div>
-        <div class="obj obj-window" data-touch="window" role="button" tabindex="0" aria-label="窗边的阳光"><i></i></div>
-        <div class="obj obj-bowl" data-touch="bowl" role="button" tabindex="0" aria-label="饭盆"><span class="ripple"></span></div>
-        <div class="obj obj-keys" data-touch="keys" role="button" tabindex="0" aria-label="门口的钥匙"><b></b><em></em><em class="k2"></em></div>
-        <div class="obj obj-sofa" data-touch="sofa" role="button" tabindex="0" aria-label="沙发"><b></b><u></u></div>
-        <div class="obj obj-leash" data-touch="leash" role="button" tabindex="0" aria-label="牵引绳"><u></u><b></b><i></i></div>
-        <div class="obj obj-bed" data-touch="bed" role="button" tabindex="0" aria-label="床边的位置"><b></b></div>
-        <div class="pet-slot" id="pet2"><img class="pet" src="assets/pet-idle.webp" alt="小狗"></div>
-        <div class="trail" id="trail2" aria-hidden="true"></div>
-        <div class="touch-hint" id="touchHint">碰一碰亮起来的东西</div>
-      </div>
-      <div class="dock">
-        <p class="narration serif" id="n2"></p>
-        <div class="slot" id="a2"></div>
-      </div>
-    </section>
-
-    <!-- ── 场景 3：留下最不想失去的记忆 ──────────────── -->
-    <section class="scene" data-scene="s3" aria-label="留下最不想失去的记忆">
-      <div class="world night" id="room3">
-        <div class="moon" aria-hidden="true"></div>
-        <div class="paw-field" id="pawField"></div>
-        <div class="pet-slot" id="pet3"><img class="pet" src="assets/pet-down.webp" alt="小狗趴着"></div>
-      </div>
-      <div class="dock">
-        <p class="narration serif" id="n3"></p>
-        <div class="slot" id="a3"></div>
+      <div class="journey-progress" id="journeyProgress" aria-label="记忆旅程足迹"></div>
+      <div class="journey-card" id="journeyCard">
+        <p class="journey-kicker" id="journeyKicker">召回 TA</p>
+        <h2 class="journey-title" id="journeyTitle">我好像……记不清自己原来的样子了</h2>
+        <p class="journey-copy" id="journeyCopy">你可以帮我想起来吗？</p>
+        <div class="journey-creator" id="journeyCreator">
+          <button class="journey-voice" id="journeyVoice" type="button" aria-label="按住爪子，说说你记忆里的 TA 吧">
+            <svg viewBox="0 0 26 26"><use href="#paw"></use></svg>
+          </button>
+          <span class="journey-voice-label" id="journeyVoiceLabel">按住爪子，说说你记忆里的 TA 吧</span>
+        </div>
+        <div class="journey-confirm" id="journeyConfirm" hidden>
+          <div class="journey-confirm-pet"><img id="journeyConfirmPet" src="assets/pet-idle.webp" alt="生成的小狗形象"></div>
+          <div class="journey-confirm-tools">
+            <span>你可以补充照片，让我再靠近一点。</span>
+            <label class="journey-add-photo" aria-label="上传图片重新生成"><input id="journeyRegeneratePhoto" type="file" accept="image/*"><span>＋</span></label>
+          </div>
+          <button class="primary-btn journey-confirm-btn" id="journeyConfirmBtn" type="button">就是这个样子</button>
+        </div>
       </div>
     </section>
 
@@ -116,23 +99,39 @@
       </div>
     </section>
 
-    <!-- ── Companion ────────────────────────────────── -->
+    <!-- ── 第三阶段：家园入口 ─────────────────────────── -->
+    <section class="scene home-hub" data-scene="home" aria-label="小狗的家">
+      <div class="home-art" aria-hidden="true"></div>
+      <div class="home-night" aria-hidden="true"></div>
+      <button class="home-hotspot home-lamp" id="homeLamp" type="button" aria-label="关灯，让小狗休息"></button>
+      <button class="home-hotspot home-mailbox" id="homeMailbox" type="button" aria-label="打开信箱，阅读今天的来信"></button>
+      <button class="home-hotspot home-bowl" id="homeBowl" type="button" aria-label="点击饭盆"></button>
+      <button class="home-hotspot home-pet" id="homePet" type="button" aria-label="和小狗说说话"></button>
+      <p class="home-note" id="homeNote" role="status" aria-live="polite"></p>
+    </section>
+
+    <!-- ── 读信子页面 ───────────────────────────────── -->
+    <section class="scene letter-page" data-scene="letter" aria-label="今天的来信">
+      <section class="letter-sheet" id="letterSheet" aria-labelledby="letterTitle" hidden>
+        <button class="letter-close" id="letterClose" type="button" aria-label="回到家">×</button>
+        <p class="letter-date" id="letterDate"></p>
+        <h2 id="letterTitle">今天的信</h2>
+        <div class="letter-body" id="letterBody"></div>
+        <p class="letter-sign" id="letterSign"></p>
+      </section>
+    </section>
+
+    <!-- ── Companion：小狗对话 ───────────────────────── -->
     <section class="scene companion" data-scene="companion" aria-label="家园">
       <header class="c-head">
         <span class="c-name" id="cName">家</span>
         <span class="c-sub" id="cSub">灯还亮着</span>
+        <button class="home-back" id="homeBack" type="button" aria-label="回到小狗的家">
+          <span class="home-back-roof"></span><span class="home-back-wall"></span>
+        </button>
       </header>
-      <div class="house-stage" id="houseStage">
-        <div class="house">
-          <div class="lamp" aria-hidden="true"><i></i><b></b><em></em></div>
-          <div class="h-obj h-window" data-safe="window" aria-hidden="true"><i></i></div>
-          <div class="h-obj h-mailbox" data-safe="mailbox" aria-hidden="true"><b></b><u></u></div>
-          <div class="h-obj h-bowl" data-safe="bowl" aria-hidden="true"></div>
-          <div class="h-obj h-ball" data-safe="ball" aria-hidden="true"></div>
-          <div class="pet-slot companion-pet" id="petC"><img class="pet" src="assets/pet-idle.webp" alt="小狗在家里"></div>
-        </div>
-      </div>
       <div class="thread" id="thread" role="log" aria-live="polite"></div>
+      <div class="pet-slot companion-pet" id="petC"><img class="pet" src="assets/pet-idle.webp" alt="小狗陪在身边"></div>
       <form class="composer" id="composer" autocomplete="off">
         <input class="c-input" id="cInput" type="text" placeholder="说点什么…" aria-label="说点什么">
         <button class="icon-btn continue" id="btnContinue" type="button" aria-label="继续，让故事往下走">
@@ -153,7 +152,7 @@
     </div>
   </div>
 
-  <p class="stage-note">键盘 <kbd>1</kbd>–<kbd>5</kbd> 可跳场景 · <kbd>R</kbd> 重来</p>
+  <p class="stage-note">键盘 <kbd>1</kbd> 开场 · <kbd>2</kbd> 记忆旅程 · <kbd>3</kbd> 家园 · <kbd>4</kbd> 对话 · <kbd>R</kbd> 重来</p>
 </div>
 
 <script src="app.js"></script>

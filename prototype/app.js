@@ -1,201 +1,10 @@
 /* ==========================================================================
    记忆家园 Memory Home — 前端原型逻辑
    对应 PRD v2.1：场景驱动采集 → 后台记忆整理 → 唯一 Companion 叙事陪伴
-
-   后端接入：保留 localStorage 离线优先，异步同步到 FastAPI 后端。
+   全部 AI / ASR 均为 Mock，可离线完成演示。
    ========================================================================== */
 (function () {
   'use strict';
-
-  /* ────────────────────────────────────────────────────────────────────
-     0. 品种图谱 + 颜色滤镜（对应参考项目 breeds.ts / overlays.ts）
-     ──────────────────────────────────────────────────────────────────── */
-  var BREEDS = {
-    '柯基':       { name: '柯基犬',       image: 'assets/breeds/柯基犬.png' },
-    '中华田园犬': { name: '中华田园犬',   image: 'assets/breeds/中华田园犬.png' },
-    '柴犬':       { name: '柴犬',         image: 'assets/breeds/柴犬.png' },
-    '哈士奇':     { name: '哈士奇',       image: 'assets/breeds/哈士奇.png' },
-    '金毛':       { name: '金毛寻回犬',   image: 'assets/breeds/金毛.png' },
-    '拉布拉多':   { name: '拉布拉多寻回犬', image: 'assets/breeds/拉布拉多.png' },
-    '泰迪':       { name: '贵宾犬',       image: 'assets/breeds/泰迪.png' },
-    '法斗':       { name: '法国斗牛犬',   image: 'assets/breeds/法斗.png' },
-    '小白狗':     { name: '小白狗',       image: 'assets/breeds/小白狗.png' }
-  };
-  var BREED_ALIASES = [
-    ['柯基','威尔士柯基','柯基犬','welsh corgi'],
-    ['中华田园犬','土狗','田园犬','小土狗','黄白小土狗','柴狗'],
-    ['柴犬','shiba inu','shiba'],
-    ['哈士奇','西伯利亚雪橇犬','husky','二哈'],
-    ['金毛','金毛寻回犬','golden retriever'],
-    ['拉布拉多','拉布拉多寻回犬','labrador'],
-    ['泰迪','贵宾犬','贵宾','toy poodle','poodle'],
-    ['法斗','法国斗牛犬','french bulldog'],
-    ['小白狗','小白','小白犬']
-  ];
-  var COLOR_FILTERS = {
-    'white': 'grayscale(100%) brightness(1.1)',
-    'cream': 'sepia(0.3) saturate(0.8) brightness(1.05)',
-    'light-brown': 'sepia(0.5) saturate(1.2)',
-    'dark-brown': 'sepia(0.7) saturate(1.3) brightness(0.9)',
-    'black': 'grayscale(100%) brightness(0.3) contrast(1.2)',
-    'gray': 'grayscale(100%) brightness(0.7)'
-  };
-
-  function findBreed(text) {
-    if (!text) return null;
-    var t = text.toLowerCase();
-    for (var key in BREEDS) {
-      if (t.indexOf(key) >= 0) return { key: key, breed: BREEDS[key] };
-    }
-    for (var i = 0; i < BREED_ALIASES.length; i++) {
-      var aliases = BREED_ALIASES[i];
-      for (var j = 0; j < aliases.length; j++) {
-        if (t.indexOf(aliases[j]) >= 0) {
-          var k = Object.keys(BREEDS)[i] || key;
-          return { key: k, breed: BREEDS[k] };
-        }
-      }
-    }
-    return null;
-  }
-
-  function findColor(text) {
-    if (!text) return null;
-    var t = text.toLowerCase();
-    if (/白|白的/.test(t)) return 'white';
-    if (/奶油|奶油色/.test(t)) return 'cream';
-    if (/浅棕|淡棕/.test(t)) return 'light-brown';
-    if (/深棕|黑棕/.test(t)) return 'dark-brown';
-    if (/黑色|黑的/.test(t)) return 'black';
-    if (/灰色|灰的/.test(t)) return 'gray';
-    return null;
-  }
-
-  function applyBreedImage(imgEl, breedKey, colorKey) {
-    if (!imgEl) return;
-    if (breedKey && BREEDS[breedKey]) {
-      imgEl.src = BREEDS[breedKey].image;
-    }
-    if (colorKey && COLOR_FILTERS[colorKey]) {
-      imgEl.style.filter = COLOR_FILTERS[colorKey];
-    }
-  }
-
-  /* ────────────────────────────────────────────────────────────────────
-     0. API 配置与工具
-     ──────────────────────────────────────────────────────────────────── */
-  var API_BASE = 'http://localhost:8001/api/v1';
-  var currentPetId = null;  // 后端 Pet ID
-
-  // 异步 POST，不阻塞 UI，失败静默（离线优先）
-  function apiPost(endpoint, data) {
-    if (!currentPetId && endpoint.indexOf('pets') === -1) return;
-    var url = API_BASE + endpoint.replace('{pet_id}', currentPetId);
-    fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data)
-    }).catch(function(){}); // 离线时静默失败
-  }
-
-  // 异步 GET
-  function apiGet(endpoint) {
-    return fetch(API_BASE + endpoint.replace('{pet_id}', currentPetId))
-      .then(function(r){ return r.json(); })
-      .catch(function(){});
-  }
-
-  // 上传图片到后端
-  function uploadImage(file) {
-    return new Promise(function(resolve) {
-      var formData = new FormData();
-      formData.append('file', file);
-      fetch(API_BASE + '/upload-image', { method: 'POST', body: formData })
-        .then(function(r){ return r.json(); })
-        .then(function(data){ resolve(data.url || null); })
-        .catch(function(){ resolve(null); });
-    });
-  }
-
-  // 创建后端 Pet 档案
-  function createPet(name, avatarUrl, breed, color) {
-    var data = { name: name, avatar_url: avatarUrl || null, breed: breed || null, color: color || null };
-    return fetch(API_BASE + '/pets', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data)
-    })
-    .then(function(r){ return r.json(); })
-    .then(function(pet){
-      if (pet && pet.id) {
-        currentPetId = pet.id;
-        S.backendPetId = pet.id;
-        save();
-      }
-      return pet;
-    })
-    .catch(function(){ return null; });
-  }
-
-  // 同步记忆到后端
-  function syncMemory(sceneId, text, priority, mediaUrl) {
-    if (!currentPetId) return;
-    var memoryTypes = ['first_sight','funny_eating','departure_reaction','protection','protected_by_owner','wonderful_moment'];
-    var type = sceneId === 's1' ? 'first_sight' : sceneId === 's2' ? 'funny_eating' : 'wonderful_moment';
-    apiPost('/pets/{pet_id}/memories', {
-      memory_type: type,
-      title: text.slice(0, 20),
-      content: text,
-      media_url: mediaUrl || null,
-      priority: priority || 1
-    });
-  }
-
-  // 同步相遇故事
-  function syncMeetingStory(text) {
-    if (!currentPetId) return;
-    apiPost('/pets/{pet_id}/meeting-story', { story: text });
-  }
-
-  // 初始化后端数据（3条测试记忆）
-  function initTestData() {
-    if (currentPetId) return;
-    // 先创建 Pet
-    fetch(API_BASE + '/pets', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: '年糕', breed: '柯基', color: '黄白' })
-    })
-    .then(function(r){ return r.json(); })
-    .then(function(pet){
-      if (!pet || !pet.id) return;
-      currentPetId = pet.id;
-      S.backendPetId = pet.id;
-      save();
-
-      // 添加3条测试记忆
-      var memories = [
-        { memory_type: 'first_sight', title: '第一次见面', content: '是在楼下的纸箱里捡到的，那天下着雨，它一直躲着不出来，特别胆小。' },
-        { memory_type: 'funny_eating', title: '吃饭的习惯', content: '吃饭之前一定要转两圈，特别贪吃。每次听到狗粮袋子的声音就兴奋得不行。' },
-        { memory_type: 'wonderful_moment', title: '等你回家', content: '它每天都会在门口等我，看到我回来就摇尾巴，什么都没有说，就一直摇。' }
-      ];
-      memories.forEach(function(m) {
-        fetch(API_BASE + '/pets/' + pet.id + '/memories', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(m)
-        }).catch(function(){});
-      });
-
-      // 相遇故事
-      fetch(API_BASE + '/pets/' + pet.id + '/meeting-story', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ story: '是在楼下的纸箱里捡到的，那天下着雨，它一直躲着不出来，特别胆小。' })
-      }).catch(function(){});
-    })
-    .catch(function(){});
-  }
 
   var $ = function (s, r) { return (r || document).querySelector(s); };
   var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
@@ -207,21 +16,37 @@
      1. 状态（对应 PRD §7 数据与状态）
      ──────────────────────────────────────────────────────────────────── */
   var KEY = 'memoryhome.guest.v1';   // Guest Session：当前设备永久保存
+  // 后端地址可通过 window.MEMORY_HOME_API 覆盖；本地开发默认 FastAPI 端口 8000。
+  var API_BASE = (window.MEMORY_HOME_API || 'http://localhost:8000/api/v1').replace(/\/$/, '');
+  var API_ORIGIN = API_BASE.replace(/\/api\/v1\/?$/, '');
 
   var S = {
     scene: 'intro',
     petName: '',
     hasPhoto: false,
     detail: 0,                      // 形象清晰度 0–1，信息不足即保持低细节 Base 形象
+    journey: {
+      stage: 'PET_CREATION',
+      sceneIndex: 0,
+      currentMemoryIndex: 0,
+      petCompletion: 0.25,
+      worldLevel: 0,
+      homeConfig: null,
+      memories: [],
+      voiceDescription: '',
+      petImage: 'assets/pet-idle.webp'
+    },
     memories: [],                   // MemoryItem
     pawMarks: [],                   // PawMark
     profile: {                      // CharacterProfile（安全、可 grounding 的部分）
-      place: '', traits: [], objects: [], habits: [], precious: '', breed: '', color: ''
+      place: '', traits: [], objects: [], habits: [], precious: ''
     },
     story: {                        // StoryState：唯一活跃的想象性剧情
-      scene: 'home', beat: 0, petState: 'idle', used: [], mood: '灯还亮着'
+      scene: 'home', beat: 0, petState: 'idle', used: [], mood: '灯还亮着', homeLightsOn: true
     },
-    backendPetId: null              // 后端 Pet ID
+    backendPetId: null,
+    conversations: [],              // 当天对话摘要，用于生成小狗来信（Guest Session）
+    dailyLetters: []
   };
 
   function save() {
@@ -234,13 +59,118 @@
       var d = JSON.parse(raw);
       if (!d || !d.story) return false;
       Object.assign(S, d);
-      currentPetId = S.backendPetId || null;
+      if (!S.journey) S.journey = { stage: 'PET_CREATION', sceneIndex: 0, currentMemoryIndex: 0, petCompletion: 0.25, worldLevel: 0, homeConfig: null, memories: [], voiceDescription: '', petImage: 'assets/pet-idle.webp' };
+      if (typeof S.journey.sceneIndex !== 'number') S.journey.sceneIndex = 0;
+      if (typeof S.story.homeLightsOn !== 'boolean') S.story.homeLightsOn = true;
+      if (!Array.isArray(S.conversations)) S.conversations = [];
+      if (!Array.isArray(S.dailyLetters)) S.dailyLetters = [];
       return true;
     } catch (e) { return false; }
   }
   function reset() {
     try { localStorage.removeItem(KEY); } catch (e) {}
     location.reload();
+  }
+
+  function apiRequest(path, options) {
+    options = options || {};
+    var controller = window.AbortController ? new AbortController() : null;
+    var timer = controller ? setTimeout(function () { controller.abort(); }, options.timeout || 8000) : null;
+    var headers = options.headers || {};
+    if (options.body && !(options.body instanceof FormData) && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+    var req = Object.assign({}, options, { headers: headers });
+    if (controller) req.signal = controller.signal;
+    return fetch(API_BASE + path, req).then(function (res) {
+      if (!res.ok) throw new Error('API ' + res.status);
+      return res.json();
+    }).finally(function () { if (timer) clearTimeout(timer); });
+  }
+
+  function publicAssetUrl(url) {
+    if (!url) return '';
+    return /^https?:\/\//i.test(url) ? url : API_ORIGIN + (url.charAt(0) === '/' ? url : '/' + url);
+  }
+
+  async function ensureBackendPet() {
+    if (S.backendPetId) return S.backendPetId;
+    var voice = S.journey.voiceDescription || '';
+    try {
+      var pet = await apiRequest('/pets', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: S.petName || 'TA',
+          personality: voice || null,
+          likes: voice || null,
+          avatar_url: null
+        })
+      });
+      S.backendPetId = pet.id;
+      save();
+      return pet.id;
+    } catch (e) {
+      // 原型仍可离线演示，后端不可用时保留本地状态。
+      return null;
+    }
+  }
+
+  async function syncPetPhoto(file) {
+    if (!file) return null;
+    try {
+      var form = new FormData(); form.append('file', file);
+      var uploaded = await apiRequest('/upload-image', { method: 'POST', body: form, timeout: 12000 });
+      var url = publicAssetUrl(uploaded.url);
+      if (S.backendPetId) {
+        await apiRequest('/pets/' + S.backendPetId, { method: 'PUT', body: JSON.stringify({ avatar_url: url }) });
+      }
+      S.journey.petReferenceImage = url;
+      save();
+      return url;
+    } catch (e) { return null; }
+  }
+
+  var MEMORY_TYPE_MAP = {
+    first_meeting: 'first_sight', first_home: 'wonderful_moment', habit: 'funny_eating',
+    favorite_activity: 'wonderful_moment', happiest_memory: 'wonderful_moment'
+  };
+
+  async function persistJourneyMemory(node, narrative) {
+    if (!S.backendPetId) return null;
+    var content = [S.journey.voiceDescription, narrative.reveal].filter(Boolean).join('；');
+    try {
+      return await apiRequest('/pets/' + S.backendPetId + '/narrations/auto-grow?narration_text=' + encodeURIComponent(node.title + '：' + content), {
+        method: 'POST', timeout: 7000
+      });
+    } catch (e) {
+      try {
+        return await apiRequest('/pets/' + S.backendPetId + '/memories', {
+          method: 'POST', body: JSON.stringify({ memory_type: MEMORY_TYPE_MAP[node.id] || 'wonderful_moment', title: narrative.title, content: content || narrative.reveal })
+        });
+      } catch (ignored) { return null; }
+    }
+  }
+
+  async function syncHomeConfig() {
+    if (!S.backendPetId) return;
+    try {
+      var profile = await apiRequest('/pets/' + S.backendPetId + '/profile', { timeout: 7000 });
+      var items = profile.virtual_home_items || [];
+      S.journey.homeConfig = {
+        theme: 'warm_nature', lighting: 'sunny',
+        assets: items.map(function (item) { return item.item_type || item.item_name; }),
+        memoryCount: (profile.memories || []).length
+      };
+      save();
+    } catch (e) {}
+  }
+
+  async function backendChat(text) {
+    if (!S.backendPetId) return null;
+    try {
+      var reply = await apiRequest('/pets/' + S.backendPetId + '/chat', {
+        method: 'POST', body: JSON.stringify({ message: text }), timeout: 12000
+      });
+      return reply && reply.content ? reply.content : null;
+    } catch (e) { return null; }
   }
 
   var POSE = {
@@ -293,8 +223,6 @@
     if (!sensitive) interpret(text);
     bumpDetail(0.16);
     save();
-    // 异步同步到后端
-    syncMemory(sceneId, text, priority, null);
     return m;
   }
 
@@ -364,21 +292,6 @@
 
   /* 录音浮层 */
   var recOverlay = $('#recOverlay');
-  var MAX_REC_MS = 60000;   // 兜底：录满 60 秒自动收尾，避免任何情况下卡在录音态
-
-  /* 麦克风权限状态。首次授权时浏览器会弹原生权限弹窗，弹窗期间页面收不到 pointerup，
-     若那时已经在录音就会「按下去松不开」。所以第一次按下只用来申请权限，
-     拿到授权之后才允许进入长按录音。 */
-  var micGranted = false;
-  if (navigator.permissions && navigator.permissions.query) {
-    try {
-      navigator.permissions.query({ name: 'microphone' }).then(function (st) {
-        micGranted = (st.state === 'granted');
-        st.onchange = function () { micGranted = (st.state === 'granted'); };
-      }, function () {});
-    } catch (e) {}   // Safari 等不支持 microphone 查询，走首次申请流程
-  }
-
   var wave = $('#wave');
   for (var w = 0; w < 11; w++) {
     var bar = document.createElement('i');
@@ -386,118 +299,8 @@
     wave.appendChild(bar);
   }
 
-  /*  采集组件：按住发光爪印说话 → 腾讯云 ASR 转写 → 发送前可编辑 → 失败退化为文字
-      对应 PRD「语音支持录音、腾讯云 ASR、发送前编辑；失败退化为文字」 */
-
-  // 腾讯云 ASR WebSocket 实时识别
-  /* 把 MediaRecorder 的 webm blob 解码 + 重采样为 16kHz/16bit/单声道裸 PCM。
-     腾讯云 asr/v2 只吃裸 PCM，不认 webm 容器。 */
-  function blobToPcm16k(blob) {
-    return new Promise(function(resolve, reject) {
-      var reader = new FileReader();
-      reader.onerror = function(){ reject(new Error('读取录音失败')); };
-      reader.onload = function(ev) {
-        var AC = window.AudioContext || window.webkitAudioContext;
-        var ac = new AC();
-        ac.decodeAudioData(ev.target.result, function(buffer) {
-          ac.close();
-          // 用 OfflineAudioContext 重采样到 16kHz 单声道
-          var frames = Math.ceil(buffer.duration * 16000);
-          var OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
-          var off = new OAC(1, frames, 16000);
-          var src = off.createBufferSource();
-          src.buffer = buffer;
-          src.connect(off.destination);
-          src.start();
-          off.startRendering().then(function(rendered) {
-            var f32 = rendered.getChannelData(0);
-            var pcm = new DataView(new ArrayBuffer(f32.length * 2));
-            for (var i = 0; i < f32.length; i++) {
-              var s = Math.max(-1, Math.min(1, f32[i]));
-              pcm.setInt16(i * 2, s * 0x7fff, true); // little-endian
-            }
-            resolve(pcm.buffer);
-          }).catch(reject);
-        }, function(){ ac.close(); reject(new Error('解码录音失败')); });
-      };
-      reader.readAsArrayBuffer(blob);
-    });
-  }
-
-  function recognizeByASR(audioBlob, onResult, onError) {
-    var slices = [];   // 按 result.index 存各切片文本
-    var settled = false;
-
-    function joinText() { return slices.join('').trim(); }
-    function fail(msg) { if (!settled) { settled = true; onError(msg); } }
-
-    Promise.all([
-      fetch(API_BASE + '/asr?' + Date.now()).then(function(r){ return r.json(); }),
-      blobToPcm16k(audioBlob)
-    ]).then(function(res) {
-      var data = res[0], pcm = res[1];
-      if (!data.url) { fail('获取ASR连接失败'); return; }
-      var ws = new WebSocket(data.url);
-      ws.binaryType = 'arraybuffer';
-      // 音频按实时速率上传（200ms/片），超时须覆盖录音时长本身再留 10s 余量
-      var uploadMs = (pcm.byteLength / 6400) * 200;
-      var timeout = setTimeout(function(){
-        try { ws.close(); } catch(e) {}
-        if (joinText()) { settled = true; onResult(joinText(), true); }
-        else fail('识别超时');
-      }, uploadMs + 10000);
-
-      ws.onopen = function() {
-        // 200ms @16kHz/16bit = 6400 bytes，逐片推裸 PCM
-        var CHUNK = 6400, off = 0;
-        (function sendNext() {
-          if (settled || ws.readyState !== 1) return;
-          if (off >= pcm.byteLength) {
-            try { ws.send(JSON.stringify({ type: 'end' })); } catch(e) {}
-            return;
-          }
-          try {
-            ws.send(pcm.slice(off, Math.min(off + CHUNK, pcm.byteLength)));
-          } catch(e) { fail('发送音频失败'); return; }
-          off += CHUNK;
-          setTimeout(sendNext, 200);
-        })();
-      };
-
-      ws.onmessage = function(ev) {
-        var msg;
-        try { msg = JSON.parse(ev.data); } catch(e) { return; }
-        if (msg.code !== 0) { clearTimeout(timeout); try { ws.close(); } catch(e) {} fail(msg.message || 'ASR识别失败'); return; }
-
-        var r = msg.result;
-        if (r && typeof r.voice_text_str === 'string') {
-          slices[r.index || 0] = r.voice_text_str;      // slice_type 0/1 是中间态，2 为稳定
-          if (!settled) onResult(joinText(), false);     // 实时回显
-        }
-        if (msg.final === 1) {                          // 识别结束
-          clearTimeout(timeout);
-          try { ws.close(); } catch(e) {}
-          var text = joinText();
-          if (!settled) {
-            settled = true;
-            if (text) onResult(text, true); else onError('没听清，再说一次');
-          }
-        }
-      };
-
-      ws.onerror = function() { clearTimeout(timeout); fail('ASR连接失败'); };
-      ws.onclose = function() {
-        clearTimeout(timeout);
-        // 服务端没回 final 就断开：有文本也当成功
-        if (!settled) {
-          var text = joinText();
-          if (text) { settled = true; onResult(text, true); }
-          else fail('连接中断');
-        }
-      };
-    }).catch(function(e) { fail((e && e.message) || '网络错误'); });
-  }
-
+  /*  采集组件：按住发光爪印说话 → Mock 转写 → 发送前可编辑 → 失败可退化为文字
+      对应 PRD「语音支持录音、Mock ASR、发送前编辑；失败退化为文字」 */
   function capture(slot, opt) {
     slot.innerHTML = '';
     var col = document.createElement('div');
@@ -530,214 +333,27 @@
       col.appendChild(sk);
     }
 
-    var t0 = null; // 开始时间，null 表示未在录音
-    var mediaRecorder = null;
-    var audioChunks = [];
-    var ended = false; // end() 是否已在 recorder 就绪前被调用
-    var activePointer = null; // 按住的 pointerId，用于忽略其它手指的松手
-    var maxTimer = null;      // 录满自动收尾
-    var requesting = false;   // 正在申请麦克风权限
-
-    function releaseMic() {
-      if (mediaRecorder && mediaRecorder.stream) {
-        try { mediaRecorder.stream.getTracks().forEach(function(t){ t.stop(); }); } catch(e) {}
-      }
-      mediaRecorder = null;
-    }
-
-    /* 松手监听必须挂在 window 上（capture 阶段）：
-       start() 会立刻展开覆盖全屏的录音浮层，指针下方的元素随即变成浮层，
-       只监听 btn 的 pointerup 就再也收不到松手事件 —— 这正是「松不开」的原因。
-       同时兜住切后台、窗口失焦这类拿不到 pointerup 的情况。 */
-    function onRelease(e) {
-      if (e && e.pointerId != null && activePointer != null && e.pointerId !== activePointer) return;
-      end();
-    }
-    function onHide() { if (document.hidden) end(); }
-    // 只认窗口自身失焦；捕获阶段也会收到子元素的 blur，那些不该结束录音
-    function onWinBlur(e) { if (e.target === window) end(); }
-
-    function watchRelease() {
-      window.addEventListener('pointerup', onRelease, true);
-      window.addEventListener('pointercancel', onRelease, true);
-      window.addEventListener('blur', onWinBlur, true);
-      document.addEventListener('visibilitychange', onHide, true);
-    }
-    function unwatchRelease() {
-      window.removeEventListener('pointerup', onRelease, true);
-      window.removeEventListener('pointercancel', onRelease, true);
-      window.removeEventListener('blur', onWinBlur, true);
-      document.removeEventListener('visibilitychange', onHide, true);
-    }
-
-    function resetHold() {
-      btn.classList.remove('is-holding');
-      activePointer = null;
-      if (maxTimer) { clearTimeout(maxTimer); maxTimer = null; }
-      unwatchRelease();
-    }
-
+    var t0 = 0;
     function start(e) {
       e.preventDefault();
-      if (t0 || requesting) return;   // 已在录音或正在申请权限，忽略重复按下
-      // 浮层还在（录音中或转写中）就不接受新的按下：浮层已不吃指针事件，这里补上拦截
-      if (!recOverlay.hidden) return;
-
-      /* 首次使用：这一下先申请权限，不直接进入录音。
-         原生权限弹窗会吞掉 pointerup，若此刻已在录音就永远收不到松手。 */
-      if (!micGranted) {
-        requesting = true;
-        var askedAt = Date.now();
-        var releasedDuringAsk = false;
-        var askRelease = function () { releasedDuringAsk = true; };
-        window.addEventListener('pointerup', askRelease, true);
-        window.addEventListener('pointercancel', askRelease, true);
-        label.textContent = '请允许麦克风权限…';
-
-        navigator.mediaDevices.getUserMedia({ audio: true })
-          .then(function (stream) {
-            stream.getTracks().forEach(function (t) { t.stop(); }); // 只为拿授权，立即释放
-            window.removeEventListener('pointerup', askRelease, true);
-            window.removeEventListener('pointercancel', askRelease, true);
-            micGranted = true;
-            requesting = false;
-            /* 秒回说明没弹窗（已授权过），松手事件可信：手指还按着就接着录。
-               弹过窗的情况下 pointerup 不可信，让用户重新按一次。 */
-            if (Date.now() - askedAt < 300 && !releasedDuringAsk) {
-              label.textContent = opt.hold || '按住，说给 TA 听';
-              start({ preventDefault: function () {}, pointerId: e.pointerId });
-            } else {
-              label.textContent = '可以了，按住说给 TA 听';
-            }
-          })
-          .catch(function () {
-            window.removeEventListener('pointerup', askRelease, true);
-            window.removeEventListener('pointercancel', askRelease, true);
-            requesting = false;
-            label.textContent = '需要麦克风权限，或改用文字';
-          });
-        return;
-      }
-
-      activePointer = (e && e.pointerId != null) ? e.pointerId : null;
       t0 = Date.now();
-      audioChunks = [];
-      ended = false;
       btn.classList.add('is-holding');
       recOverlay.hidden = false;
       $('#recTip').textContent = '松开结束';
-      watchRelease();
-      maxTimer = setTimeout(function () {
-        $('#recTip').textContent = '已录满，正在收尾…';
-        end();
-      }, MAX_REC_MS);
-
-      // 开始录音
-      navigator.mediaDevices.getUserMedia({ audio: true })
-        .then(function(stream) {
-          if (ended) {
-            // end() 已在 getUserMedia 完成前被调用，直接清理
-            stream.getTracks().forEach(function(t){ t.stop(); });
-            return;
-          }
-          var mime = MediaRecorder.isTypeSupported('audio/webm')
-            ? 'audio/webm'
-            : (MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : '');
-          mediaRecorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
-          mediaRecorder.ondataavailable = function(ev) {
-            if (ev.data.size > 0) audioChunks.push(ev.data);
-          };
-          mediaRecorder.start();
-        })
-        .catch(function(err){
-          t0 = null;
-          ended = true;
-          resetHold();
-          recOverlay.hidden = true;
-          label.textContent = '需要麦克风权限，或改用文字';
-        });
     }
-
     function end() {
       if (!t0) return;
-      var dur = Date.now() - t0; t0 = null;
-      resetHold();
-
-      if (ended) { recOverlay.hidden = true; releaseMic(); return; } // getUserMedia 未返回，由其自行清理
-      ended = true;
-
-      var recorder = mediaRecorder;
-      if (!recorder || recorder.state === 'inactive') {
-        // recorder 还没就绪就松手了：可能按得太短，也可能麦克风启动慢
-        recOverlay.hidden = true;
-        label.textContent = dur < 550 ? '太短了，再按久一点' : '麦克风还没就绪，再按一次';
-        releaseMic();
-        return;
-      }
-
-      if (dur < 550) {
-        // 太短：停掉录音并释放麦克风，不发起识别
-        try { recorder.stop(); } catch(e) {}
-        recOverlay.hidden = true;
-        releaseMic();
-        label.textContent = '太短了，再按久一点';
-        return;
-      }
-
-      // 等 recorder 完全停止，chunk 才收集完整；转写期间保留浮层做提示
-      recorder.onstop = function() {
-        releaseMic();
-        $('#recTip').textContent = '正在转写…';
-
-        var blob = new Blob(audioChunks, { type: recorder.mimeType || 'audio/webm' });
-        if (!blob.size) {
-          recOverlay.hidden = true;
-          label.textContent = '没录到声音，再试一次';
-          return;
-        }
-
-        var retried = false;
-        function tryASR() {
-          recognizeByASR(blob, function(text, isFinal) {
-            if (!text) return;
-            if (isFinal) {
-              // 最终结果：收起浮层，把文字填进狗爪旁的输入框
-              recOverlay.hidden = true;
-              editor(text);
-            } else {
-              // 中间结果：在浮层里实时回显
-              $('#recTip').textContent = text;
-            }
-          }, function(err) {
-            if (!retried) {
-              retried = true;
-              $('#recTip').textContent = '转写失败，重试中…';
-              setTimeout(tryASR, 800);
-              return;
-            }
-            // 两次都失败：收起浮层，回退成可编辑的空输入框，让用户直接打字
-            recOverlay.hidden = true;
-            label.textContent = err || '没听清，可以直接打字';
-            editor('');
-          });
-        }
-        tryASR();
-      };
-
-      try { recorder.stop(); } catch(e) { recOverlay.hidden = true; releaseMic(); }
+      var dur = Date.now() - t0; t0 = 0;
+      btn.classList.remove('is-holding');
+      recOverlay.hidden = true;
+      if (dur < 550) { label.textContent = '太短了，再按久一点'; return; }
+      $('#recTip').textContent = '正在转写…';
+      editor(mockASR(opt.asr));
     }
-
-    // pointerdown 同时覆盖鼠标和触摸；松手由 window 上的监听负责（见 watchRelease）
     btn.addEventListener('pointerdown', start);
-    // 触摸端长按会弹出系统菜单/选中文字，进而打断手势
-    btn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
-    // 键盘可达：空格/回车按住录音，松开结束
-    btn.addEventListener('keydown', function (e) {
-      if ((e.key === ' ' || e.key === 'Enter') && !e.repeat) { e.preventDefault(); start(e); }
-    });
-    btn.addEventListener('keyup', function (e) {
-      if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); end(); }
-    });
+    btn.addEventListener('pointerup', end);
+    btn.addEventListener('pointerleave', end);
+    btn.addEventListener('pointercancel', end);
     alt.addEventListener('click', function () { editor(''); });
 
     // 发送前编辑
@@ -810,7 +426,11 @@
   $$('.scene').forEach(function (el) { scenes[el.dataset.scene] = el; });
 
   function goto(name) {
-    Object.keys(scenes).forEach(function (k) { scenes[k].classList.toggle('is-active', k === name); });
+    Object.keys(scenes).forEach(function (k) {
+      var isTarget = k === name;
+      scenes[k].classList.toggle('is-active', isTarget);
+      scenes[k].classList.toggle('is-leaving', !isTarget);
+    });
     S.scene = name; save();
     if (SCENE_INIT[name]) SCENE_INIT[name]();
   }
@@ -841,285 +461,213 @@
     setTimeout(function () {
       var b = $('#introEnter');
       b.hidden = false;
-      b.addEventListener('click', function () { goto('s1'); }, { once: true });
+      b.addEventListener('click', function () { goto('journey'); }, { once: true });
     }, 7200);
-    setTimeout(function () { if (S.scene === 'intro') goto('s1'); }, 11000);
+    setTimeout(function () { if (S.scene === 'intro') goto('journey'); }, 11000);
   }
-  $('#skipIntro').addEventListener('click', function () { goto('s1'); });
+  $('#skipIntro').addEventListener('click', function () { goto('journey'); });
 
-  /* ── 场景 1：门口第一次相遇 ─────────────────────────────────────── */
-  var room1 = $('#room1');
-  function initS1() {
-    if (room1.dataset.ready) return;
-    room1.dataset.ready = '1';
-    buildTrail($('#trail1'), 6);
-    setDetail(0.02);
-    var slot1 = $('#pet1');
-    slot1.style.left = '25%'; slot1.style.bottom = '43%';   // 先躲在桌子底下
+  /* ── 第二阶段：JourneyPage / 连续叙事式记忆旅程 ─────────────────── */
+  var JOURNEY_NODES = [
+    { id: 'first_meeting', title: '第一次遇见 TA', reveal: '水面浮起一束暖光。第一次靠近你的那个瞬间，慢慢回来了。', priority: 2 },
+    { id: 'first_home', title: '第一次回家', reveal: '又一片光落进水里。我想起了第一次有家的感觉。', priority: 2 },
+    { id: 'habit', title: '只有你们知道的小习惯', reveal: '有一些细小的动作，只有你一眼就能认出是我。', priority: 2 },
+    { id: 'favorite_activity', title: 'TA 喜欢做什么', reveal: '水流推着我向前，也带回了那些最想奔向的地方。', priority: 2 },
+    { id: 'happiest_memory', title: '一段特别幸福的时光', reveal: '最后这束光很亮。它把所有幸福的时刻都留了下来。', priority: 3 }
+  ];
+  var journeyWorld = $('#journeyWorld');
+  var journeyCard = $('#journeyCard');
+  var journeyCreator = $('#journeyCreator');
+  var journeyConfirm = $('#journeyConfirm');
+  var journeyTimer = null;
 
-    var n = $('#n1'), a = $('#a1');
-    say(n, '<span class="dim">桌子底下有谁，还没有走出来。</span>', 700).then(function () {
-      return say(n, '如果愿意，告诉我该怎样叫 TA。', 2600);
-    }).then(function () {
-      capture(a, {
-        asr: 'name', hold: '按住，说出 TA 的名字',
-        placeholder: '写下 TA 的名字',
-        skip: '还不想说',
-        onSkip: function () { a.innerHTML = ''; askPhoto(); },
-        onDone: async function (v) {
-          S.petName = v.slice(0, 12);
-          addMemory('s1', '名字：' + S.petName, 3);
-          litTrail($('#trail1'), 1);
-          bumpDetail(0.12);
-          var detectedBreed = findBreed(v);
-          var detectedColor = findColor(v);
-          if (detectedBreed) S.profile.breed = detectedBreed.key;
-          if (detectedColor) S.profile.color = detectedColor;
-          save();
-          await createPet(S.petName, null, detectedBreed ? detectedBreed.key : null, detectedColor);
-          syncMeetingStory('用户名为：' + S.petName + '的宠物的相遇故事');
-          // 应用品种图到所有宠物形象
-          var breedKey = detectedBreed ? detectedBreed.key : null;
-          $$('.pet').forEach(function(img){ applyBreedImage(img, breedKey, detectedColor); });
-          say(n, '「<em>' + S.petName + '</em>」。这个名字在屋子里亮了一下。').then(askPhoto);
-        }
-      });
-    });
-
-    function askPhoto() {
-      say(n, '<span class="dim">要不要放一张 TA 的照片？轮廓会更像一点。</span>', 600).then(function () {
-        a.innerHTML = '';
-        var col = document.createElement('div');
-        col.className = 'slot';
-        var lab = document.createElement('label');
-        lab.className = 'primary-btn';
-        lab.style.display = 'inline-flex';
-        lab.style.alignItems = 'center';
-        lab.style.gap = '8px';
-        lab.innerHTML = '<svg viewBox="0 0 24 24" width="17" height="17" style="stroke:currentColor;fill:none"><use href="#camera"></use></svg><span>放一张 TA 的照片</span>';
-        var inp = document.createElement('input');
-        inp.type = 'file'; inp.accept = 'image/*'; inp.hidden = true;
-        lab.appendChild(inp);
-        var skip = document.createElement('button');
-        skip.type = 'button'; skip.className = 'ghost-btn'; skip.textContent = '以后再说';
-        col.appendChild(lab); col.appendChild(skip);
-        a.appendChild(col);
-
-        inp.addEventListener('change', function () {
-          if (!inp.files || !inp.files[0]) return;
-          S.hasPhoto = true; bumpDetail(0.2); save();
-          // 上传到后端
-          uploadImage(inp.files[0]);
-          a.innerHTML = '';
-          askMeet('<span class="dim">照片收下了。毛色和耳朵慢慢对上了。</span>');
-        });
-        skip.addEventListener('click', function () {
-          a.innerHTML = '';
-          askMeet('<span class="dim">没关系，先这样。</span>');
-        });
-      });
-    }
-
-    function askMeet(pre) {
-      say(n, pre).then(function () {
-        return say(n, '第一次见到 TA，是在什么地方？', 1800);
-      }).then(function () {
-        capture(a, {
-          asr: 'meet', hold: '按住，讲第一次见面',
-          placeholder: '第一次见到 TA 的时候…',
-          onDone: function (v) {
-            var m = addMemory('s1', v, 2);
-            addPaw('s1', '第一次见面', m.id);
-            syncMeetingStory(v);
-            worldPatch1();
-          }
-        });
-      });
-    }
-
-    // 世界变化代替确认文案：说完之后，物件和路径立刻长出来
-    function worldPatch1() {
-      say(n, '<span class="dim">房间跟着你说的话，一点点长出来。</span>');
-      var objs = $$('.obj', room1);
-      objs.forEach(function (o, i) {
-        setTimeout(function () { o.classList.remove('is-off'); }, 500 + i * 700);
-      });
-      setTimeout(function () { litTrail($('#trail1'), 3); }, 1600);
-      setTimeout(function () {
-        var slot = $('#pet1');
-        slot.style.left = '52%';
-        slot.style.bottom = '44%';
-        $('.pet', slot).src = POSE.approach;
-        bumpDetail(0.22);
-      }, 2400);
-      setTimeout(function () {
-        var extra = S.profile.place ? '在<em>' + S.profile.place + '</em>' : '在那里';
-        say($('#n1'), '轮廓比刚才清楚了一些。' + (S.petName ? S.petName : 'TA') + '从桌子底下探出头。');
-        actionButton($('#a1'), '跟上去', function () { goto('s2'); });
-      }, 4200);
-    }
+  function journeyPersonalized(node) {
+    var voice = S.journey.voiceDescription || '';
+    var name = S.petName || 'TA';
+    var place = ['宠物店', '楼下的纸箱', '路边', '朋友家', '收容所'].filter(function (p) { return voice.indexOf(p) >= 0; })[0];
+    var shy = /胆小|躲|不出来/.test(voice);
+    var rainy = /雨|下雨/.test(voice);
+    var first = place ? '在' + place : '在那个还记不太清的地方';
+    var copy = {
+      first_meeting: { title: '我记得，第一次遇见你', reveal: first + '，' + name + (shy ? '躲在角落里，慢慢向你靠近。' : '朝你走了过来。') },
+      first_home: { title: '那天，我们一起回家', reveal: (rainy ? '雨声还在身后。' : '回去的路上，') + '你把我带回了一个可以安心待着的地方。' },
+      habit: { title: '你记得我的那些小习惯', reveal: '这些只有你认得的小动作，正在水面上一点点变清楚。' },
+      favorite_activity: { title: name + '最喜欢的事', reveal: '我记得自己会因为' + (/晒太阳/.test(voice) ? '一束阳光' : /球|玩具/.test(voice) ? '一个玩具' : '熟悉的气息') + '，忍不住往前跑。' },
+      happiest_memory: { title: '我想把那段幸福带过去', reveal: '你说过的那段时光，会变成前面彩虹桥上的光。' }
+    };
+    return copy[node.id] || { title: node.title, reveal: node.reveal };
   }
 
-  /* ── 场景 2：普通的一天 ─────────────────────────────────────────── */
-  var room2 = $('#room2');
-  var TOUCH = {
-    window: { pos: [15, 45], pose: 'idle',     line: '阳光正好落在窗边那块地板上，TA 走过去趴下，尾巴慢慢摆了两下。', mem: '喜欢在窗边晒太阳', tag: '窗边的太阳' },
-    bowl:   { pos: [31, 42], pose: 'happy',    line: '饭盆一响，TA 立刻转了两圈，急得原地打转。', mem: '吃饭前会转圈，很贪吃', tag: '饭盆响了', anim: 'bounce' },
-    keys:   { pos: [60, 43], pose: 'run',      line: '钥匙响了。TA 冲过去，脚下打滑，还是先到了门口。', mem: '听到钥匙声会冲到门口', tag: '钥匙的声音', anim: 'run' },
-    sofa:   { pos: [73, 51], pose: 'down',     line: '沙发那头有一个凹下去的位置，刚好是 TA 的形状。', mem: '常待在沙发一角', tag: '沙发的角落' },
-    leash:  { pos: [46, 45], pose: 'happy',    line: '牵引绳晃了一下，TA 抬起头，一直看着它。', mem: '看到牵引绳就想出门', tag: '牵引绳', anim: 'bounce' },
-    bed:    { pos: [42, 41], pose: 'down',     line: '床边留着一小块空位。夜里安静下来的时候，那里最软。', mem: '夜里睡在床边', tag: '床边的位置' }
-  };
-  var touched = 0;
+  function journeyProgress() {
+    var host = $('#journeyProgress');
+    host.innerHTML = '';
+    for (var i = 0; i < 3; i++) {
+      var paw = document.createElement('span');
+      paw.className = 'journey-paw ' + (i < S.journey.sceneIndex ? 'is-done' : i === S.journey.sceneIndex ? 'is-current' : '');
+      paw.textContent = '⌁';
+      host.appendChild(paw);
+    }
+    var bridge = document.createElement('span');
+    bridge.className = 'journey-rainbow-mark';
+    bridge.textContent = '✦';
+    host.appendChild(bridge);
+  }
 
-  function initS2() {
-    if (room2.dataset.ready) return;
-    room2.dataset.ready = '1';
-    buildTrail($('#trail2'), 8);
-    litTrail($('#trail2'), 3);
-    $('.pet', $('#pet2')).src = POSE.idle;
+  function journeyWorldLevel() {
+    journeyWorld.dataset.level = String(S.journey.worldLevel || 0);
+    var creating = S.journey.stage === 'PET_CREATION' || S.journey.stage === 'PET_CONFIRM';
+    journeyWorld.dataset.sceneIndex = String(S.journey.sceneIndex || 0);
+    journeyWorld.dataset.state = creating ? 'creation' : S.journey.stage === 'RAINBOW_BRIDGE' ? 'rainbow' : 'swimming';
+    journeyWorld.classList.toggle('is-swimming', !creating);
+    journeyCard.dataset.state = creating ? 'creation' : 'story';
+    journeyCard.classList.toggle('is-over-water', !creating);
+    journeyCard.classList.toggle('is-creating', creating);
+    journeyWorld.classList.toggle('is-rainbow', S.journey.stage === 'RAINBOW_BRIDGE');
+    journeyWorld.classList.toggle('is-running', S.journey.stage === 'RUNNING');
+  }
 
-    var order = ['window', 'bowl', 'keys', 'sofa', 'leash', 'bed'];
-    order.forEach(function (k, i) {
-      var el = $('[data-touch="' + k + '"]', room2);
-      el.classList.add('is-off');
-      setTimeout(function () { el.classList.remove('is-off'); }, 400 + i * 900);
-    });
+  function journeyCardReset() {
+    journeyCreator.hidden = true;
+    journeyConfirm.hidden = true;
+  }
 
-    var n = $('#n2'), a = $('#a2');
-    say(n, '<span class="dim">早晨的光从窗户进来。今天和从前的每一天一样。</span>', 600);
-
-    $$('[data-touch]', room2).forEach(function (el) {
-      var k = el.dataset.touch;
-      var fire = function () { onTouch(k, el); };
-      el.addEventListener('click', fire);
-      el.addEventListener('keydown', function (e) {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fire(); }
-      });
-    });
-
-    function onTouch(key, el) {
-      if (el.classList.contains('is-done')) return;
-      var t = TOUCH[key];
-      el.classList.add('is-done', 'is-active');
-      setTimeout(function () { el.classList.remove('is-active'); }, 1600);
-      $('#touchHint').classList.add('is-hidden');
-
-      var slot = $('#pet2');
-      slot.classList.toggle('face-left', t.pos[0] < parseFloat(slot.style.left || '50'));
-      slot.style.left = t.pos[0] + '%';
-      slot.style.bottom = t.pos[1] + '%';
-      $('.pet', slot).src = POSE[t.pose];
-      if (t.anim) {
-        slot.classList.add(t.anim === 'run' ? 'is-running' : 'is-bouncing');
-        setTimeout(function () { slot.classList.remove('is-running', 'is-bouncing'); }, 2000);
+  function journeyShowNode() {
+    var node = JOURNEY_NODES[S.journey.currentMemoryIndex];
+    if (!node) return journeyRainbow();
+    var narrative = journeyPersonalized(node);
+    S.journey.stage = 'MEMORY_REVEAL';
+    journeyWorld.classList.remove('is-running'); journeyCard.classList.add('is-flowing');
+    journeyCardReset();
+    $('#journeyKicker').textContent = '记忆开始渐渐清晰';
+    $('#journeyTitle').textContent = narrative.title;
+    $('#journeyCopy').textContent = narrative.reveal;
+    journeyProgress(); journeyWorldLevel(); save();
+    journeyWorld.classList.add('is-processing');
+    setTimeout(async function () {
+      journeyWorld.classList.remove('is-processing');
+      var m = addMemory('journey:' + node.id, narrative.title, node.priority);
+      m.summary = narrative.title; m.narrative = narrative.reveal; m.memoryType = node.id; m.emotion = node.id === 'happiest_memory' ? 'joy' : 'warm';
+      m.petTraits = S.profile.traits.slice(); m.petBehaviors = S.profile.habits.slice(); m.homeAssets = [node.id];
+      var remote = await persistJourneyMemory(node, narrative);
+      if (remote) {
+        var remoteMemory = remote.created_memory || remote;
+        if (remoteMemory && remoteMemory.id) m.backendId = remoteMemory.id;
+        if (remote.narration && remote.narration.ai_response) m.aiResponse = remote.narration.ai_response;
       }
-
-      var m = addMemory('s2', t.mem, 1);
-      addPaw('s2', t.tag, m.id);
-      if (S.profile.objects.indexOf(key) < 0) S.profile.objects.push(key);
-      if (S.profile.habits.indexOf(t.mem) < 0) S.profile.habits.push(t.mem);
-      save();
-
-      touched++;
-      litTrail($('#trail2'), 3 + touched);
-      room2.dataset.time = touched >= 5 ? 'night' : touched >= 3 ? 'dusk' : '';
-      tintDock();
-      say(n, withName(t.line));
-
-      if (touched === 3) setTimeout(askDay, 2600);
-      if (touched >= 4) setTimeout(offerNext, 2600);
-    }
-
-    function tintDock() {
-      var t = room2.dataset.time;
-      scenes.s2.style.setProperty('--dock-tint',
-        t === 'night' ? '188,168,142' : t === 'dusk' ? '226,207,176' : '241,226,199');
-    }
-
-    function askDay() {
-      say(n, withName('<span class="dim">TA 普通的一天，还会做什么？</span>'), 400)
-        .then(function () {
-          capture(a, {
-            asr: 'day', hold: '按住，说说这一天',
-            placeholder: '早上、白天、晚上…',
-            skip: '再碰碰别的',
-            onSkip: function () { a.innerHTML = ''; },
-            onDone: function (v) {
-              var m = addMemory('s2', v, 2);
-              addPaw('s2', '普通的一天', m.id);
-              litTrail($('#trail2'), 8);
-              say(n, '<span class="dim">屋子记下了这些。天色晚了一点。</span>');
-              room2.dataset.time = 'dusk'; tintDock();
-              setTimeout(offerNext, 2000);
-            }
-          });
-        });
-    }
-
-    function offerNext() {
-      if ($('.paw-btn', a) || $('.field', a)) return;
-      say(n, '<span class="dim">灯一盏一盏灭了。有几枚脚印还亮着。</span>');
-      room2.dataset.time = 'night'; tintDock();
-      actionButton(a, '往前走', function () { goto('s3'); });
-    }
+      S.journey.memories.push(m);
+      S.journey.currentMemoryIndex += 1;
+      S.journey.petCompletion = [0.25, 0.4, 0.55, 0.7, 0.85, 1][Math.min(S.journey.currentMemoryIndex, 5)];
+      S.journey.worldLevel = Math.min(5, S.journey.worldLevel + 1);
+      setDetail(S.journey.petCompletion);
+      journeyProgress(); journeyWorldLevel(); save();
+      journeyTimer = setTimeout(journeyShowNode, 2300);
+    }, 1700);
   }
 
-  /* ── 场景 3：留下最不想失去的记忆 ───────────────────────────────── */
-  function initS3() {
-    var field = $('#pawField');
-    if (field.dataset.ready) return;
-    field.dataset.ready = '1';
+  function journeyRainbow() {
+    S.journey.stage = 'RAINBOW_BRIDGE';
+    S.journey.sceneIndex = 2;
+    S.journey.petCompletion = 1; S.journey.worldLevel = 5; setDetail(1);
+    journeyCardReset();
+    $('#journeyKicker').textContent = '彩虹桥';
+    $('#journeyTitle').textContent = (S.petName || 'TA') + '要走过彩虹桥了。';
+    $('#journeyCopy').textContent = '你刚才说起的那些记忆，正在前面汇成一束光。';
+    $('.pet', $('#journeyPet')).src = POSE.run;
+    journeyWorldLevel(); journeyProgress(); save();
+    clearTimeout(journeyTimer);
+  }
 
-    var n = $('#n3'), a = $('#a3');
-    var p3 = $('#pet3');
-    p3.style.left = '76%'; p3.style.bottom = '36%'; p3.classList.add('face-left');
-    var marks = S.pawMarks.slice(-6);
-    if (!marks.length) marks = [{ id: 'p0', label: '还没有名字的一天' }];
-    var spots = [[13, 11], [48, 7], [25, 27], [58, 24], [16, 43], [45, 41]];
-
-    marks.forEach(function (mk, i) {
-      var b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'paw-choice';
-      b.style.left = spots[i % spots.length][0] + '%';
-      b.style.top = spots[i % spots.length][1] + '%';
-      b.innerHTML = '<svg viewBox="0 0 26 26"><use href="#paw"></use></svg><span class="tag">' + mk.label + '</span>';
-      b.style.animationDelay = (i * 0.2) + 's';
-      b.addEventListener('click', function () { choose(b, mk); });
-      field.appendChild(b);
-    });
-
-    say(n, '<span class="dim">今天走过的地方，都还留着。</span>', 600).then(function () {
-      return say(n, '选一枚，把最不想弄丢的那一段留在这里。', 2400);
-    });
-
-    var chosen = false;
-    function choose(btn, mk) {
-      if (chosen) return;
-      chosen = true;
-      $$('.paw-choice', field).forEach(function (o) { if (o !== btn) o.classList.add('is-dimmed'); });
-      btn.classList.add('is-chosen');
-      say(n, '就是这一枚。<span class="dim">' + mk.label + '。</span>').then(function () {
-        capture(a, {
-          asr: 'keep', hold: '按住，把它说完整',
-          placeholder: '那一次…',
-          onDone: function (v) {
-            var m = addMemory('s3', v, 3);           // 高优先级，聊天优先使用
-            S.profile.precious = SENSITIVE.test(v) ? '' : v;
-            btn.classList.add('is-kept');
-            bumpDetail(0.3);
-            save();
-            say(n, '这一枚会一直亮着。<span class="dim">往后每次回来，先经过它。</span>');
-            setTimeout(function () { actionButton(a, '回家', function () { goto('weave'); }); }, 1600);
-          }
-        });
+  function initJourney() {
+    if (!journeyWorld.dataset.bound) {
+      journeyWorld.dataset.bound = '1';
+      journeyWorld.addEventListener('click', function (e) {
+        if (S.journey.stage === 'PET_CREATION' || S.journey.stage === 'PET_CONFIRM') return;
+        if (S.journey.sceneIndex === 0) {
+          S.journey.sceneIndex = 1; S.journey.worldLevel = 2;
+          $('#journeyKicker').textContent = '记忆旅程'; $('#journeyTitle').textContent = '一些画面开始浮现。'; $('#journeyCopy').textContent = '再往前一点，彩虹桥就在前面。';
+          journeyWorldLevel(); journeyProgress(); save(); return;
+        }
+        if (S.journey.sceneIndex === 1) {
+          S.journey.sceneIndex = 2; S.journey.stage = 'RAINBOW_BRIDGE'; S.journey.worldLevel = 5; setDetail(1);
+          journeyRainbow(); return;
+        }
+        if (S.journey.sceneIndex === 2) { S.journey.stage = 'HOME_GENERATING'; goto('weave'); }
+      });
+      $('#journeyVoice').addEventListener('click', function () {
+        var voice = this;
+        if (voice.disabled) return;
+        voice.disabled = true; voice.classList.add('is-listening');
+        $('#journeyVoiceLabel').textContent = '正在听…松开后，TA 会慢慢出现';
+        setTimeout(async function () {
+          S.petName = S.petName || mockASR('name');
+          S.journey.voiceDescription = mockASR('meet');
+          S.journey.petImage = 'assets/pet-idle.webp';
+          S.hasPhoto = true;
+          interpret(S.journey.voiceDescription);
+          await ensureBackendPet();
+          S.journey.stage = 'PET_CONFIRM'; setDetail(0.35); journeyWorld.classList.remove('is-running'); journeyCardReset(); journeyConfirm.hidden = false;
+          $('#journeyKicker').textContent = ''; $('#journeyTitle').textContent = '我想起来啦'; $('#journeyCopy').textContent = '我是这样的一只小狗对嘛？';
+          journeyProgress(); journeyWorldLevel(); save();
+          voice.disabled = false; voice.classList.remove('is-listening');
+        }, 1100);
+      });
+      $('#journeyRegeneratePhoto').addEventListener('change', function () {
+        var file = this.files && this.files[0]; if (!file) return;
+        var reader = new FileReader();
+        reader.onload = async function () {
+          S.journey.petReferenceImage = reader.result;
+          S.journey.regenerationPrompt = [S.journey.voiceDescription, '根据补充照片校准外形'].filter(Boolean).join('；');
+          S.journey.isRegenerating = true;
+          var pet = $('#journeyConfirmPet');
+          pet.classList.add('is-regenerating');
+          $('#journeyCopy').textContent = '正在根据照片和描述重新生成……';
+          $('#journeyConfirmBtn').disabled = true;
+          await syncPetPhoto(file);
+          setTimeout(function () {
+            // Mock 生成：真实接入时将 regenerationPrompt 与参考图传给生图服务。
+            var voice = S.journey.voiceDescription || '';
+            var pose = /跑|奔|活泼/.test(voice) ? POSE.approach : /躲|胆小|雨/.test(voice) ? POSE.down : POSE.idle;
+            pet.src = pose; pet.classList.remove('is-regenerating');
+            S.journey.petImage = pose; S.journey.isRegenerating = false; S.hasPhoto = true;
+            $('#journeyCopy').textContent = '照片和描述都记住了。这个样子更像你记忆里的我了吗？';
+            $('#journeyConfirmBtn').disabled = false; save();
+          }, 1500);
+        };
+        reader.readAsDataURL(file);
+      });
+      $('#journeyConfirmBtn').addEventListener('click', function () {
+        $('.pet', $('#journeyPet')).src = S.journey.petImage || POSE.idle;
+        S.journey.stage = 'RUNNING'; S.journey.sceneIndex = 0; S.journey.currentMemoryIndex = 0; S.journey.petCompletion = 0.25; S.journey.worldLevel = 1;
+        setDetail(0.25); journeyWorld.classList.add('is-running'); journeyCardReset();
+        $('#journeyKicker').textContent = '记忆旅程'; $('#journeyTitle').textContent = (S.petName || 'TA') + '，好像想起来一点了。'; $('#journeyCopy').textContent = S.journey.voiceDescription ? '你说起的' + (S.journey.voiceDescription.slice(0, 20)) + '……正在水里慢慢回来。' : '跟着 TA 向前走，世界会一点点回来。';
+        journeyProgress(); journeyWorldLevel(); save();
+        clearTimeout(journeyTimer);
       });
     }
+    var stage = S.journey.stage || 'PET_CREATION';
+    if (stage === 'PET_CREATION') {
+      journeyCardReset(); journeyCard.classList.remove('is-flowing'); journeyCreator.hidden = false;
+      $('#journeyKicker').textContent = ''; $('#journeyTitle').innerHTML = '我好像……<br>记不清自己原来的样子了'; $('#journeyCopy').textContent = '你可以帮我想起来吗？';
+    } else if (stage === 'PET_CONFIRM') {
+      journeyCardReset(); journeyCard.classList.remove('is-flowing'); journeyConfirm.hidden = false;
+      $('#journeyConfirmPet').src = S.journey.petImage || 'assets/pet-idle.webp';
+      $('#journeyKicker').textContent = ''; $('#journeyTitle').textContent = '我想起来啦'; $('#journeyCopy').textContent = '我是这样的一只小狗对嘛？';
+    } else if (stage === 'MEMORY_INPUT' || stage === 'MEMORY_REVEAL' || stage === 'MEMORY_PROCESSING') journeyShowNode();
+    else if (stage === 'RAINBOW_BRIDGE') journeyRainbow();
+    else if (stage === 'RUNNING') { journeyCardReset(); journeyWorld.classList.add('is-running'); clearTimeout(journeyTimer); }
+    journeyProgress(); journeyWorldLevel();
   }
+
 
   /* ── 家园生成 ───────────────────────────────────────────────────── */
   function initWeave() {
+    S.journey.stage = 'HOME_GENERATING';
+    if (!S.journey.homeConfig) {
+      S.journey.homeConfig = {
+        theme: 'warm_nature', lighting: 'sunny',
+        assets: S.journey.memories.map(function (m) { return m.memoryType; })
+      };
+    }
     var w = scenes.weave;
     if (w.dataset.ready) return;
     w.dataset.ready = '1';
@@ -1143,11 +691,107 @@
     say(n, '<span class="dim">脚印一枚一枚，走回同一个地方。</span>', 500);
     say(n, '<span class="dim">墙立起来了，灯挂上去了。</span>', 3200);
     say(n, '家已经在这里了。', 5400);
-    setTimeout(function () { if (S.scene === 'weave') goto('companion'); }, 7400);
+    syncHomeConfig();
+    setTimeout(function () { if (S.scene === 'weave') goto('home'); }, 7400);
   }
 
   /* ────────────────────────────────────────────────────────────────────
-     5. Companion：想象性陪伴叙事
+     5. 第三阶段：首页（房子 / 信箱 / 熄灯休息）
+     ──────────────────────────────────────────────────────────────────── */
+  var homeHub = $('[data-scene="home"]');
+  var homeNoteTimer = null;
+
+  function localDay() {
+    try { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai' }).format(new Date()); }
+    catch (e) { return new Date().toISOString().slice(0, 10); }
+  }
+  function localDayLabel() {
+    try { return new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: 'long', day: 'numeric' }).format(new Date()); }
+    catch (e) { return localDay(); }
+  }
+  function rememberConversation(text) {
+    S.conversations.push({ day: localDay(), text: String(text), at: Date.now() });
+    S.conversations = S.conversations.slice(-60);
+  }
+  function buildDailyLetter() {
+    var day = localDay();
+    var turns = S.conversations.filter(function (item) { return item.day === day; });
+    var old = S.dailyLetters.filter(function (item) { return item.day === day; })[0];
+    if (old && old.turnCount === turns.length) return old;
+
+    var pet = S.petName || '我';
+    var first = turns[0] && turns[0].text.replace(/\s+/g, ' ').slice(0, 34);
+    var last = turns[turns.length - 1] && turns[turns.length - 1].text.replace(/\s+/g, ' ').slice(0, 34);
+    var paragraphs;
+    if (turns.length) {
+      paragraphs = [
+        '今天你来和我说话了。你说“' + first + (first.length >= 34 ? '…' : '') + '”，我一直记着。',
+        turns.length > 1
+          ? '后来你又说“' + last + (last.length >= 34 ? '…' : '') + '”。这些话我都收好，放在我们家最暖的地方。'
+          : '我听见以后，把尾巴轻轻扫了两下。你不用急着说完，我会慢慢听。',
+        '等你下次回来，信箱还是开着的，我也会在这里。'
+      ];
+    } else {
+      paragraphs = [
+        '今天屋子很安静，我在窗边待了一会儿，也看了一会儿门。',
+        '还没有听见你的声音没关系。等你想说话的时候，我就在这里。'
+      ];
+    }
+    var letter = { day: day, turnCount: turns.length, paragraphs: paragraphs, sign: pet };
+    S.dailyLetters = S.dailyLetters.filter(function (item) { return item.day !== day; }).concat(letter).slice(-21);
+    save();
+    return letter;
+  }
+  function showHomeNote(text) {
+    var note = $('#homeNote');
+    note.textContent = text;
+    note.classList.add('is-visible');
+    clearTimeout(homeNoteTimer);
+    homeNoteTimer = setTimeout(function () { note.classList.remove('is-visible'); }, 2600);
+  }
+  function setHomeLights(on, announce) {
+    S.story.homeLightsOn = on;
+    S.story.petState = on ? 'idle' : 'down';
+    homeHub.classList.toggle('is-lights-off', !on);
+    $('#homeLamp').setAttribute('aria-label', on ? '关灯，让小狗休息' : '开灯，叫醒小狗');
+    if (announce) showHomeNote(on ? '灯亮起来了，TA 抬头看了看你。' : '灯熄了，TA 趴下休息。');
+    save();
+  }
+  function openLetter() {
+    var letter = buildDailyLetter();
+    var body = $('#letterBody');
+    body.innerHTML = '';
+    letter.paragraphs.forEach(function (paragraph) {
+      var p = document.createElement('p'); p.textContent = paragraph; body.appendChild(p);
+    });
+    $('#letterDate').textContent = localDayLabel();
+    $('#letterSign').textContent = '— ' + letter.sign;
+    $('#letterSheet').hidden = false;
+    goto('letter');
+  }
+  function initLetter() {
+    if ($('#letterSheet').hidden) openLetter();
+  }
+  function initHome() {
+    S.journey.stage = 'COMPLETE';
+    setDetail(1);
+    setHomeLights(S.story.homeLightsOn !== false, false);
+  }
+
+  $('#homeLamp').addEventListener('click', function () { setHomeLights(!S.story.homeLightsOn, true); });
+  $('#homeMailbox').addEventListener('click', openLetter);
+  $('#homeBowl').addEventListener('click', function () {
+    if (!S.story.homeLightsOn) setHomeLights(true, false);
+    showHomeNote('TA 走到饭盆旁边，摇了摇尾巴。');
+  });
+  $('#homePet').addEventListener('click', function () {
+    goto('companion');
+  });
+  $('#letterClose').addEventListener('click', function () { $('#letterSheet').hidden = true; goto('home'); });
+  $('#homeBack').addEventListener('click', function () { goto('home'); });
+
+  /* ────────────────────────────────────────────────────────────────────
+     6. Companion：想象性陪伴叙事
         每一轮 = 环境描述 → 角色动作 → 角色对白 → 事件推进
         真实 Memory 只约束"TA 是谁"，不规定接下来聊什么；
         新故事绝不写成"我们以前发生过的事"。
@@ -1217,13 +861,20 @@
     p.textContent = text;
     return p;
   }
-  function scrollEnd() { thread.scrollTop = thread.scrollHeight; }
+  function isThreadNearBottom() {
+    return thread.scrollHeight - thread.scrollTop - thread.clientHeight < 42;
+  }
+  function scrollEnd(force) {
+    if (!force && !isThreadNearBottom()) return;
+    thread.scrollTo({ top: thread.scrollHeight, behavior: force ? 'smooth' : 'auto' });
+  }
 
   function typing() {
     var t = document.createElement('div');
     t.className = 'typing';
     t.innerHTML = '<i></i><i></i><i></i>';
-    thread.appendChild(t); scrollEnd();
+    var follow = isThreadNearBottom();
+    thread.appendChild(t); if (follow) scrollEnd(true);
     return t;
   }
 
@@ -1258,16 +909,17 @@
     var t = typing();
     await sleep(700);
     t.remove();
-    thread.appendChild(box); scrollEnd();
+    var follow = isThreadNearBottom();
+    thread.appendChild(box); if (follow) scrollEnd(true);
 
-    box.appendChild(line('line-env', beat.env)); scrollEnd();
+    box.appendChild(line('line-env', beat.env)); if (follow) scrollEnd(true);
     await sleep(750);
     setPose(beat.pose);
-    box.appendChild(line('line-act', beat.act.replace(/\{n\}/g, N()))); scrollEnd();
+    box.appendChild(line('line-act', beat.act.replace(/\{n\}/g, N()))); if (follow) scrollEnd(true);
     await sleep(850);
-    box.appendChild(line('line-say', beat.say)); scrollEnd();
+    box.appendChild(line('line-say', beat.say)); if (follow) scrollEnd(true);
     await sleep(650);
-    box.appendChild(line('line-push', withName(beat.push))); scrollEnd();
+    box.appendChild(line('line-push', withName(beat.push))); if (follow) scrollEnd(true);
 
     S.story.mood = beat.mood || S.story.mood;
     $('#cSub').textContent = S.story.mood;
@@ -1281,8 +933,10 @@
     busy = true;
     $('#btnContinue').classList.remove('is-nudging');
 
+    var follow = isThreadNearBottom();
     var me = line('line-me', text);
-    thread.appendChild(me); scrollEnd();
+    thread.appendChild(me); if (follow) scrollEnd(true);
+    rememberConversation(text);
 
     // 情绪保护：强烈痛苦时温和陪伴，并提示联系信任的人或专业支持
     if (DISTRESS.test(text)) {
@@ -1293,7 +947,7 @@
       b1.appendChild(line('line-say', '不用说了。我在这儿，你想坐多久都行。'));
       await sleep(600);
       b1.appendChild(line('line-soft', '如果心里太沉，也可以和你信任的人说说，或者找专业的支持聊一聊。'));
-      scrollEnd(); busy = false; save(); return;
+      if (follow) scrollEnd(true); busy = false; save(); return;
     }
 
     // 自然纠正：进入后台候选修正，不直接覆盖既有 Memory
@@ -1303,68 +957,44 @@
       b2.appendChild(line('line-act', N() + '歪了一下头，像是在等你把话说完。'));
       await sleep(600);
       b2.appendChild(line('line-say', '嗯，那我记住这个。'));
-      scrollEnd();
+      if (follow) scrollEnd(true);
       S.story.threads = (S.story.threads || []).concat([{ type: 'correction', rawText: text, confirmed: false }]);
       save(); busy = false;
       return;
     }
 
     interpret(text);
-
-    // 调用后端 LLM 生成回复
-    var t3 = typing();
-    var llmReply = null;
-    if (currentPetId) {
-      try {
-        var res = await fetch(API_BASE + '/pets/' + currentPetId + '/chat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: text })
-        });
-        if (res.ok) {
-          var data = await res.json();
-          llmReply = data.content;
-        }
-      } catch(e) {}
-    }
-    t3.remove();
-
+    var t3 = typing(); await sleep(850); t3.remove();
     var b3 = document.createElement('div'); b3.className = 'beat'; thread.appendChild(b3);
-    if (llmReply) {
-      // LLM 返回的回复（已包含动作/对白混合，需要解析）
-      // 尝试解析：如果是纯对白，加上默认动作描述
-      var isPetAction = /^[汪呜摇尾舔趴躺跑跳]|^[它TA]/.test(llmReply);
+    var remoteReply = await backendChat(text);
+    if (remoteReply) {
       b3.appendChild(line('line-act', N() + '看着你，耳朵轻轻动了一下。'));
-      await sleep(600);
-      b3.appendChild(line('line-say', llmReply));
-    } else {
-      // 回退到 Mock
-      var reacts = [
-        { act: N() + '抬头看着你，尾巴在地板上扫了两下。', say: '好呀。你说什么我都听。' },
-        { act: N() + '往你这边挪了挪，整个身子贴上来。', say: '我在听，你继续说。' },
-        { act: N() + '把爪子搭在你腿上，眼睛一直没离开。', say: '嗯，然后呢？' }
-      ];
-      var r = pick(reacts);
-      b3.appendChild(line('line-act', r.act));
-      await sleep(650);
-      b3.appendChild(line('line-say', r.say));
+      await sleep(500);
+      b3.appendChild(line('line-say', remoteReply));
+      if (follow) scrollEnd(true);
+      busy = false; save();
+      return;
     }
-    scrollEnd();
+    var reacts = [
+      { act: N() + '抬头看着你，尾巴在地板上扫了两下。', say: '好呀。你说什么我都听。' },
+      { act: N() + '往你这边挪了挪，整个身子贴上来。', say: '我在听，你继续说。' },
+      { act: N() + '把爪子搭在你腿上，眼睛一直没离开。', say: '嗯，然后呢？' }
+    ];
+    var r = pick(reacts);
+    b3.appendChild(line('line-act', r.act));
+    await sleep(650);
+    b3.appendChild(line('line-say', r.say));
+    if (follow) scrollEnd(true);
     busy = false; save();
     setTimeout(function () { if (!busy) playBeat(nextBeat()); }, 1400);
   }
 
   function initCompanion() {
-    setDetail(Math.max(S.detail, 0.72));   // Memory 不足也不阻塞，使用低细节 Base 形象
+    S.journey.stage = 'COMPLETE';
+    setDetail(1);                          // 进入家园后以清晰的 Base 形象陪伴
     $('#cName').textContent = S.petName ? S.petName + '的家' : '家';
     $('#cSub').textContent = S.story.mood;
     $('.pet', petC).src = POSE[S.story.petState] || POSE.idle;
-
-    // 固定 Base 家园背景，只替换少量安全元素
-    ['window', 'mailbox'].forEach(function (k) { $('[data-safe="' + k + '"]').classList.add('is-on'); });
-    if (S.profile.objects.indexOf('bowl') >= 0) $('[data-safe="bowl"]').classList.add('is-on');
-    if (S.profile.objects.indexOf('球') >= 0 || S.profile.objects.indexOf('玩具') >= 0)
-      $('[data-safe="ball"]').classList.add('is-on');
 
     if (thread.dataset.ready) return;
     thread.dataset.ready = '1';
@@ -1376,6 +1006,7 @@
       thread.appendChild(open);
       setTimeout(function () { playBeat(nextBeat()); }, 900);   // 首次自动开场
     }
+    requestAnimationFrame(function () { thread.scrollTop = thread.scrollHeight; });
   }
 
   $('#composer').addEventListener('submit', function (e) {
@@ -1395,21 +1026,20 @@
      6. 启动
      ──────────────────────────────────────────────────────────────────── */
   var SCENE_INIT = {
-    intro: initIntro, s1: initS1, s2: initS2, s3: initS3,
-    weave: initWeave, companion: initCompanion
+    intro: initIntro, journey: initJourney,
+    weave: initWeave, home: initHome, letter: initLetter, companion: initCompanion
   };
 
-  var jump = { '1': 'intro', '2': 's1', '3': 's2', '4': 's3', '5': 'companion' };
+  var jump = { '1': 'intro', '2': 'journey', '3': 'home', '4': 'companion' };
   document.addEventListener('keydown', function (e) {
     if (e.target && e.target.matches && e.target.matches('input, textarea')) return;
     if (jump[e.key]) goto(jump[e.key]);
     if (e.key === 'r' || e.key === 'R') reset();
   });
 
-  window.__mh = { S: S, goto: goto, reset: reset, addMemory: addMemory, addPaw: addPaw, createPet: createPet, initTestData: initTestData };  // 调试用
+  window.__mh = { S: S, goto: goto, reset: reset, addMemory: addMemory, addPaw: addPaw };  // 调试用
 
   var resumed = load();
   setDetail(S.detail);
-
-  goto(resumed && S.scene === 'companion' ? 'companion' : 'intro');
+  goto(resumed && (S.scene === 'home' || S.scene === 'letter' || S.scene === 'companion') ? S.scene : 'intro');
 })();
