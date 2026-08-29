@@ -974,9 +974,8 @@
           return;
         }
         if (S.journey.sceneIndex === 0) {
-          S.journey.sceneIndex = 1; S.journey.worldLevel = 2;
-          $('#journeyKicker').textContent = '记忆旅程'; $('#journeyTitle').textContent = '一些画面开始浮现。'; $('#journeyCopy').textContent = '再往前一点，彩虹桥就在前面。';
-          journeyWorldLevel(); journeyProgress(); save(); return;
+          // 跳过「游泳」画面，直接进入下一个场景（彩虹桥）
+          journeyRainbow(); return;
         }
         if (S.journey.sceneIndex === 1) {
           S.journey.sceneIndex = 2; S.journey.stage = 'RAINBOW_BRIDGE'; S.journey.worldLevel = 5; setDetail(1);
