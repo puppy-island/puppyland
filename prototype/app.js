@@ -404,7 +404,7 @@
 
   /* ── 引导文案（语音输入时的提示语）────────────────────────────── */
   var GUIDE_TEXT = {
-    name: '按住爪子，说说你记忆里的 TA 吧',
+    name: '按下爪子，说说你记忆里的 TA 吧',
     meet: '说说你们第一次见面的情景',
     day: '说一件你和它之间的小事',
     keep: '说说它留给你的最深印象'
@@ -634,26 +634,67 @@
     }
 
     var t0 = 0;
+    var localStream = null;
+    var localAudioCtx = null;
+    var localAnalyser = null;
+    var localMonitorTimer = null;
+    var localQuietSince = 0;
+
+    function stopLocalMonitor() {
+      if (localMonitorTimer) { clearInterval(localMonitorTimer); localMonitorTimer = null; }
+      if (localAudioCtx) { try { localAudioCtx.close(); } catch (e) {} localAudioCtx = null; }
+      localAnalyser = null; localQuietSince = 0;
+    }
+
     function start(e) {
       e.preventDefault();
+      if (t0) return; // 防止重复触发
       t0 = Date.now();
       btn.classList.add('is-holding');
       recOverlay.hidden = false;
-      $('#recTip').textContent = '松开结束';
+      $('#recTip').textContent = '说完自动结束';
+
+      // 启动麦克风音频监控，沉默5秒自动停止
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) {
+          localStream = s;
+          localAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          localAnalyser = localAudioCtx.createAnalyser(); localAnalyser.fftSize = 512;
+          localAudioCtx.createMediaStreamSource(s).connect(localAnalyser);
+          var data = new Uint8Array(localAnalyser.fftSize);
+          localMonitorTimer = setInterval(function () {
+            if (!localAnalyser || !t0) return;
+            localAnalyser.getByteTimeDomainData(data);
+            var sum = 0;
+            for (var j = 0; j < data.length; j++) { var n = (data[j] - 128) / 128; sum += n * n; }
+            var rms = Math.sqrt(sum / data.length);
+            if (rms < 0.035) {
+              if (!localQuietSince) localQuietSince = Date.now();
+              if (Date.now() - localQuietSince >= 5000) {
+                stop(); return;
+              }
+            } else {
+              localQuietSince = 0;
+            }
+          }, 200);
+        }).catch(function () {});
+      }
     }
-    function end() {
+    function stop() {
       if (!t0) return;
       var dur = Date.now() - t0; t0 = 0;
       btn.classList.remove('is-holding');
       recOverlay.hidden = true;
-      if (dur < 550) { label.textContent = '太短了，再按久一点'; return; }
+      stopLocalMonitor();
+      if (localStream) { try { localStream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {} localStream = null; }
+      if (dur < 550) { label.textContent = '太短了，再按一次'; return; }
       $('#recTip').textContent = '';
       editor(mockASR(opt.asr));
     }
     btn.addEventListener('pointerdown', start);
-    btn.addEventListener('pointerup', end);
-    btn.addEventListener('pointerleave', end);
-    btn.addEventListener('pointercancel', end);
+    btn.addEventListener('pointerup', stop);
+    btn.addEventListener('pointerleave', stop);
+    btn.addEventListener('pointercancel', stop);
     alt.addEventListener('click', function () { editor(''); });
 
     // 发送前编辑
@@ -1065,11 +1106,14 @@
               var rms = Math.sqrt(sum / data.length);
               if (rms < 0.035) {
                 if (!quietSince) quietSince = Date.now();
+                if (Date.now() - quietSince >= 5000) {
+                  doStop(null); // 沉默5秒，自动结束录音
+                  return;
+                }
                 if (Date.now() - quietSince >= 3500) {
                   var pause = $('#recPause');
                   pause.textContent = pauseIndex++ % 2 ? '然后呢？' : '嗯……';
                   pause.classList.add('is-visible');
-                  quietSince = Date.now();
                 }
               } else {
                 quietSince = 0;
@@ -1107,7 +1151,7 @@
           voiceBtn.classList.add('is-holding');
           // 记忆旅程录音不显示整屏浮层，仅保留爪子按钮的录音状态。
           recOverlay.hidden = true;
-          $('#journeyVoiceLabel').textContent = '正在听…松开结束';
+          $('#journeyVoiceLabel').textContent = '正在听…说完自动结束';
 
           if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
             ended = true;
@@ -1147,7 +1191,8 @@
             });
         }
 
-        function stop(event) {
+        function doStop(event) {
+          clearTimeout(autoEndTimer); autoEndTimer = null;
           if (ended) { releaseMic(); return; }
           ended = true;
           stopPauseMonitor();
@@ -1164,7 +1209,7 @@
 
           if (!mediaRecorder || mediaRecorder.state === 'inactive') {
             releaseMic();
-            $('#journeyVoiceLabel').textContent = '太短了，再按久一点';
+            $('#journeyVoiceLabel').textContent = '太短了，再按一次';
             setTimeout(function () { $('#journeyVoiceLabel').textContent = GUIDE_TEXT.name; }, 2000);
             return;
           }
@@ -1206,8 +1251,8 @@
         // 引导提示：告诉用户该说什么
         $('#journeyVoiceLabel').textContent = GUIDE_TEXT.name;
         voiceBtn.addEventListener('pointerdown', start);
-        voiceBtn.addEventListener('pointerup', stop);
-        voiceBtn.addEventListener('pointercancel', stop);
+        voiceBtn.addEventListener('pointerup', doStop);
+        voiceBtn.addEventListener('pointercancel', doStop);
       })();
 
       function typeVoiceText(text, done) {
@@ -1603,7 +1648,30 @@
   }
 
   function setPose(pose) {
-    $('.pet', petC).src = POSE[pose] || POSE.idle;
+    var petEl = $('.pet', petC);
+    // 如果有AI生成的狗狗图片或品种图片，优先显示；否则使用姿态精灵图
+    if (S.generatedDogImage) {
+      // 移除旧的生成图，保留一份（或重新创建）——用 img.src 切换更流畅
+      var existingGen = petC.querySelector('.generated-dog-img');
+      if (existingGen) {
+        existingGen.src = 'data:image/png;base64,' + S.generatedDogImage;
+      } else {
+        var img = document.createElement('img');
+        img.className = 'generated-dog-img';
+        img.src = 'data:image/png;base64,' + S.generatedDogImage;
+        img.alt = '小狗陪在身边';
+        img.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain;pointer-events:none;';
+        petEl.style.visibility = 'hidden';
+        petC.style.position = 'relative';
+        petC.appendChild(img);
+      }
+      petEl.src = 'assets/pet-idle.webp'; // 保留 src 避免 broken icon
+    } else {
+      petEl.style.visibility = '';
+      var gen = petC.querySelector('.generated-dog-img');
+      if (gen) gen.remove();
+      petEl.src = POSE[pose] || POSE.idle;
+    }
     S.story.petState = pose;
     if (pose === 'run') { petC.classList.add('is-running'); setTimeout(function () { petC.classList.remove('is-running'); }, 1800); }
     if (pose === 'happy') { petC.classList.add('is-bouncing'); setTimeout(function () { petC.classList.remove('is-bouncing'); }, 2000); }

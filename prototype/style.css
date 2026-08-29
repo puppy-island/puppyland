@@ -809,9 +809,11 @@ body{
 .companion-pet{
   position:absolute; z-index:5; right:12px; bottom:78px; left:auto; width:84px; margin:0;
   filter:drop-shadow(0 9px 10px rgba(74,50,31,.18)); pointer-events:none;
-  transition:transform .45s var(--ease);
+  transition:transform .45s var(--ease), filter 1.1s var(--ease);
 }
 .companion-pet .pet{ width:100%; height:auto; }
+.companion-pet .generated-dog-img{ transition:filter 1.1s var(--ease); }
+.home-hub.is-lights-off ~ .scene.companion .companion-pet .generated-dog-img{ filter:brightness(.73) saturate(.78); }
 
 /* 叙事流 */
 .thread{
