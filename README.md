@@ -14,11 +14,46 @@
 
 ## 跑起来
 
+### 1. 配置环境变量
+
 ```bash
-python3 -m http.server 4321 --directory prototype
+cp .env.example .env
+# 编辑 .env，填入你的 API 密钥和腾讯云配置
 ```
 
-打开 <http://localhost:4321>，手机尺寸窗口效果最佳。详见 [prototype/README.md](prototype/README.md)。
+**.env 可配置项：**
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `PORT` | 后端服务端口 | `8001` |
+| `HOST` | 后端监听地址（开发用 `0.0.0.0`） | `0.0.0.0` |
+| `model` | LLM 模型名称 | `deepseek-v4-flash` |
+| `base_url` | LLM API 地址（OpenAI 兼容） | `https://api.openai-next.com/v1` |
+| `api_key` | LLM API 密钥 | —（必填） |
+| `TENCENT_SECRET_ID` | 腾讯云 SecretId（语音识别用） | — |
+| `TENCENT_SECRET_KEY` | 腾讯云 SecretKey | — |
+| `ASR_APP_ID` | 腾讯云 AppId | — |
+
+> **LLM 配置**：支持任何 OpenAI-compatible API（DeepSeek、Qwen、通义千问等），填入对应的 `base_url` 和 `api_key` 即可。
+>
+> **语音识别**：若不配置，语音输入会降级为手动文字输入。
+
+### 2. 启动后端
+
+```bash
+python run.py
+```
+
+后端启动后运行在 `http://localhost:8001`（端口由 `.env` 中的 `PORT` 控制）。
+
+### 3. 启动前端
+
+```bash
+cd prototype
+npx http-server -p 3000 -c-1
+```
+
+打开 <http://localhost:3000>，手机尺寸窗口效果最佳。
 
 ## 不在仓库里的东西
 

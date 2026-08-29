@@ -17,7 +17,7 @@
      ──────────────────────────────────────────────────────────────────── */
   var KEY = 'memoryhome.guest.v1';   // Guest Session：当前设备永久保存
   // 后端地址可通过 window.MEMORY_HOME_API 覆盖；本地开发默认 FastAPI 端口 8000。
-  var API_BASE = (window.MEMORY_HOME_API || 'http://localhost:8000/api/v1').replace(/\/$/, '');
+  var API_BASE = (window.MEMORY_HOME_API || 'http://localhost:8001/api/v1').replace(/\/$/, '');
   var API_ORIGIN = API_BASE.replace(/\/api\/v1\/?$/, '');
 
   var S = {
@@ -248,6 +248,60 @@
 
   function mockASR(key) { return pick(ASR[key] || ASR.day); }
 
+  // 腾讯云实时语音识别（WebSocket）
+  function doASR(audioBlob, callback) {
+    // 1. 从后端获取签名后的 WebSocket URL
+    fetch(API_BASE + '/asr')
+      .then(function(res) { return res.json(); })
+      .then(function(data) {
+        var url = data.url;
+        var ws = new WebSocket(url);
+        var closed = false;
+        var transcripts = [];
+
+        ws.onopen = function() {
+          // 2. 将音频 blob 转为 ArrayBuffer，再逐片发送 PCM
+          var reader = new FileReader();
+          reader.onload = function(ev) {
+            var buffer = ev.target.result;
+            // 发送音频数据
+            ws.send(buffer);
+            // 3. 发送结束信号
+            ws.send(JSON.stringify({ type: 'end' }));
+          };
+          reader.readAsArrayBuffer(audioBlob);
+        };
+
+        ws.onmessage = function(ev) {
+          try {
+            var msg = JSON.parse(ev.data);
+            // 腾讯云 ASR 返回格式：{ result: { voice_text_str: "..." }, slice_type: 2 }
+            if (msg.result && msg.result.voice_text_str) {
+              transcripts.push(msg.result.voice_text_str);
+            }
+            // slice_type == 2 表示这段语音已经转写完毕（最终结果）
+            if (msg.slice_type === 2) {
+              closed = true;
+              ws.close();
+            }
+          } catch(e) {}
+        };
+
+        ws.onerror = function() {
+          if (!closed) { closed = true; ws.close(); }
+        };
+
+        ws.onclose = function() {
+          // 合并所有分片转写结果
+          var text = transcripts.join('');
+          callback(text || null);
+        };
+      })
+      .catch(function() {
+        callback(null); // 降级
+      });
+  }
+
   /* ────────────────────────────────────────────────────────────────────
      3. 通用组件：旁白、爪印轨迹、录音采集
      ──────────────────────────────────────────────────────────────────── */
@@ -334,21 +388,61 @@
     }
 
     var t0 = 0;
+    var mediaRecorder = null;
+    var audioChunks = [];
+    var asrWs = null;
+
     function start(e) {
       e.preventDefault();
       t0 = Date.now();
       btn.classList.add('is-holding');
       recOverlay.hidden = false;
       $('#recTip').textContent = '松开结束';
+      audioChunks = [];
+
+      navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
+        mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+        mediaRecorder.ondataavailable = function(ev) {
+          if (ev.data.size > 0) audioChunks.push(ev.data);
+        };
+        mediaRecorder.start(100); // 每100ms一个chunk
+      }).catch(function() {
+        // 麦克风不可用，静默降级到手动输入
+      });
     }
+
     function end() {
       if (!t0) return;
       var dur = Date.now() - t0; t0 = 0;
       btn.classList.remove('is-holding');
       recOverlay.hidden = true;
-      if (dur < 550) { label.textContent = '太短了，再按久一点'; return; }
-      $('#recTip').textContent = '正在转写…';
-      editor(mockASR(opt.asr));
+
+      if (mediaRecorder) {
+        mediaRecorder.stream.getTracks().forEach(function(t) { t.stop(); });
+        if (dur < 550) { mediaRecorder = null; label.textContent = '太短了，再按久一点'; return; }
+
+        $('#recTip').textContent = '正在转写…';
+
+        // 等待所有 chunk 收集完毕
+        mediaRecorder.onstop = function() {
+          var blob = new Blob(audioChunks, { type: 'audio/webm' });
+          audioChunks = [];
+          doASR(blob, function(text) {
+            mediaRecorder = null;
+            if (text) {
+              editor(text);
+            } else {
+              // 转写失败，降级到手动输入
+              editor('');
+            }
+          });
+        };
+        mediaRecorder.stop();
+      } else {
+        // 没有麦克风权限，直接手动输入
+        if (dur < 550) { label.textContent = '太短了，再按久一点'; return; }
+        editor('');
+      }
     }
     btn.addEventListener('pointerdown', start);
     btn.addEventListener('pointerup', end);

@@ -10,6 +10,7 @@ from backend_app.schemas import (
     FullPetProfileResponse,
     PetEmotionalProfileCreate, PetEmotionalProfileResponse,
     ChatMessageCreate, ChatMessageResponse, ChatRequest,
+    GenerateBeatRequest,
     PetStateUpdate, PetStateResponse, MoveCommand, AnimationCommand,
     CustomAnimationCreate, CustomAnimationUpdate, CustomAnimationResponse,
     SceneRecordResponse, SceneRecordCreate,
@@ -949,6 +950,169 @@ def get_chat_history(pet_id: int, limit: int = Query(50, ge=1, le=100)):
         messages = [dict_from_row(row) for row in cursor.fetchall()]
         messages.reverse()
         return messages
+
+# ============ Generate Beat (LLM 剧情生成) ============
+
+@router.post("/pets/{pet_id}/generate-beat", tags=["AI"])
+def generate_beat(pet_id: int, request: GenerateBeatRequest = None):
+    """
+    AI 根据宠物档案和记忆生成个性化剧情片段
+    返回：环境描写、动作、对白、推进语、姿态
+    """
+    prev_env = request.previous_beat if request else None
+
+    def is_env_consistent(env: str) -> bool:
+        """检查环境是否与前一幕一致"""
+        if not prev_env:
+            return False
+        has_night = any(c in prev_env for c in ['暗', '夜', '灯', '黑', '黄昏', '傍晚', '暮'])
+        has_day = any(c in prev_env for c in ['阳光', '天亮', '白天', '午后', '早晨', '晨'])
+        if has_night and not any(c in env for c in ['暗', '夜', '灯', '黑', '黄昏', '傍晚', '暮']):
+            return False
+        if has_day and not any(c in env for c in ['阳光', '天亮', '白天', '午后', '早晨', '晨']):
+            return False
+        return True
+
+    def generate_consistent_env(prev_env: str, mood: str) -> str:
+        """生成与前一幕场景一致的环境描写"""
+        if not prev_env:
+            return "房间里安静而温暖，TA安静地趴在主人脚边。"
+        is_night = any(c in prev_env for c in ['暗', '夜', '灯', '黑', '黄昏', '傍晚', '暮'])
+        is_day = any(c in prev_env for c in ['阳光', '天亮', '白天', '午后', '早晨', '晨'])
+        if is_night:
+            return f"房间里只剩下一盏灯，暖黄的光洒在地板上，TA安静地趴在主人脚边。"
+        elif is_day:
+            return "阳光透过窗户洒进来，TA在光影里安静地趴着。"
+        return prev_env
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        # 获取宠物信息
+        cursor.execute("SELECT * FROM pets WHERE id = ?", (pet_id,))
+        pet = dict_from_row(cursor.fetchone())
+        if not pet:
+            raise HTTPException(status_code=404, detail="Pet not found")
+
+        # 获取记忆（按类型优先级）
+        cursor.execute("""
+            SELECT * FROM memories WHERE pet_id = ? ORDER BY
+                CASE memory_type
+                    WHEN 'first_sight' THEN 3
+                    WHEN 'wonderful_moment' THEN 2
+                    WHEN 'funny_eating' THEN 1
+                    ELSE 0
+                END DESC,
+                created_at DESC LIMIT 3
+        """, (pet_id,))
+        raw_memories = [dict_from_row(row) for row in cursor.fetchall()]
+
+        # 过滤敏感记忆
+        SENSITIVE = ['走了', '离开', '去世', '最后', '生病', '治疗', '安乐', '遗憾', '对不起', '后悔', '骨灰', '天堂', '彩虹桥']
+        safe_memories = [m for m in raw_memories if not any(p in m.get('content', '') for p in SENSITIVE)]
+
+        # 获取情感档案
+        cursor.execute("SELECT * FROM pet_profiles WHERE pet_id = ?", (pet_id,))
+        profile_row = cursor.fetchone()
+        emotional_profile = dict_from_row(profile_row) if profile_row else None
+
+        pet_name = pet.get('name', 'TA')
+        breed = pet.get('breed', '不明')
+        personality = pet.get('personality', '温柔忠诚')
+        likes = pet.get('likes', '陪伴主人')
+        fears = pet.get('fears', '离开主人')
+
+        # 构建记忆上下文
+        memory_context = ""
+        if safe_memories:
+            mem_type_map = {
+                'first_sight': '第一次见面',
+                'funny_eating': '吃饭习惯',
+                'departure_reaction': '出门反应',
+                'protection': '保护主人',
+                'protected_by_owner': '被保护',
+                'wonderful_moment': '温暖时刻'
+            }
+            memory_lines = []
+            for m in safe_memories[:3]:
+                memory_lines.append(f"- {mem_type_map.get(m.get('memory_type', ''), '记忆')}：{m.get('content', '')[:60]}")
+            memory_context = "\n".join(memory_lines)
+
+        system_prompt = f"""【角色】你是{pet_name}，一只可爱的小狗，在主人的「记忆家园」里。现在要生成一段陪伴主人的剧情片段。
+
+【宠物档案】
+- 名字：{pet_name}
+- 品种：{breed}
+- 性格：{personality}
+- 喜欢：{likes}
+- 害怕：{fears}
+
+【记忆】（主人和你真实发生过的事）
+{memory_context if memory_context else "- 暂无具体记忆，但主人一直想念你"}
+
+【要求】
+生成一个剧情片段，包含：
+1. env（环境描写，15字以内，简短有画面感）
+2. act（角色动作，20字以内）
+3. say（对白，10-20字，温暖陪伴风格）
+4. push（推进语，带主人名字，10字以内）
+5. pose（姿态：idle/approach/happy/run/down/sleep）
+
+严格JSON格式返回：
+{{"env":"...","act":"...","say":"...","push":"...","pose":"..."}}
+
+规则：
+- 只用第一人称"我"，动作要像狗狗
+- 对白温暖简短，不说"我记得以前"
+- 如果 prev_env 有夜晚/灯光元素，env 也要是夜晚氛围
+- 如果 prev_env 有阳光元素，env 也要是白天氛围"""
+
+        try:
+            from openai import OpenAI
+            from dotenv import load_dotenv
+            load_dotenv(override=True)
+
+            client = OpenAI(
+                api_key=os.getenv("api_key"),
+                base_url=os.getenv("base_url")
+            )
+
+            response = client.chat.completions.create(
+                model=os.getenv("model", "deepseek-v4-flash"),
+                messages=[{"role": "user", "content": system_prompt}],
+                temperature=0.8,
+                max_tokens=200
+            )
+
+            import json, re
+            raw = response.choices[0].message.content.strip()
+
+            # 尝试从 ```json ... ``` 或 ``` ... ``` 中提取 JSON
+            match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
+            if match:
+                json_str = match.group(1)
+            else:
+                # 尝试直接解析整段
+                json_str = raw
+
+            beat = json.loads(json_str)
+
+            # 场景一致性后处理
+            env = beat.get("env", "")
+            if not is_env_consistent(env):
+                beat["env"] = generate_consistent_env(prev_env or "", "")
+
+            return beat
+
+        except Exception as e:
+            # 降级：返回固定剧情
+            import random
+            fallback_beats = [
+                {"env": "房间里安静而温暖，TA安静地趴在主人脚边。", "act": f"{pet_name}轻轻摇着尾巴，耳朵微微动了一下。", "say": "我在这里陪你。", "push": f"和{pet_name}安静地待着。", "pose": "idle"},
+                {"env": "阳光透过窗户洒进来，TA在光影里安静地趴着。", "act": f"{pet_name}抬起头，看着主人，尾巴慢慢扫过地面。", "say": "你回来了。", "push": f"和{pet_name}一起晒太阳。", "pose": "idle"},
+                {"env": "房间里只剩下一盏灯，暖黄的光洒在地板上。", "act": f"{pet_name}蜷在你脚边，身体暖暖的。", "say": "今晚也在。", "push": f"和{pet_name}一起入睡。", "pose": "sleep"},
+            ]
+            return random.choice(fallback_beats)
 
 # ============ Pet State Routes (2D Animation) ============
 
