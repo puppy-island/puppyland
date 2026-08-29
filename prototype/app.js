@@ -636,14 +636,18 @@
     var t0 = 0;
     var localStream = null;
     var localAudioCtx = null;
+    var localProcessor = null;
     var localAnalyser = null;
     var localMonitorTimer = null;
     var localQuietSince = 0;
+    var pcmChunks = [];
 
     function stopLocalMonitor() {
       if (localMonitorTimer) { clearInterval(localMonitorTimer); localMonitorTimer = null; }
+      if (localProcessor) { try { localProcessor.disconnect(); } catch (e) {} localProcessor = null; }
+      if (localAnalyser) { try { localAnalyser.disconnect(); } catch (e) {} localAnalyser = null; }
       if (localAudioCtx) { try { localAudioCtx.close(); } catch (e) {} localAudioCtx = null; }
-      localAnalyser = null; localQuietSince = 0;
+      localQuietSince = 0;
     }
 
     function start(e) {
@@ -653,14 +657,38 @@
       btn.classList.add('is-holding');
       recOverlay.hidden = false;
       $('#recTip').textContent = '说完自动结束';
+      pcmChunks = [];
 
-      // 启动麦克风音频监控，沉默5秒自动停止
+      // 直接在同步回调内创建 AudioContext，避免 iOS 异步创建导致拿到破损音频
       if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
         navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) {
           localStream = s;
+          // AudioContext 必须在用户同步手势内创建，iOS 要求如此
           localAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-          localAnalyser = localAudioCtx.createAnalyser(); localAnalyser.fftSize = 512;
-          localAudioCtx.createMediaStreamSource(s).connect(localAnalyser);
+          var src = localAudioCtx.createMediaStreamSource(s);
+
+          // 用于静默检测的分析器
+          localAnalyser = localAudioCtx.createAnalyser();
+          localAnalyser.fftSize = 512;
+          src.connect(localAnalyser);
+
+          // 直接采集原始 PCM（16kHz mono Int16），绕过 MediaRecorder
+          localProcessor = localAudioCtx.createScriptProcessor(4096, 1, 1);
+          src.connect(localProcessor);
+          localProcessor.connect(localAudioCtx.destination); // 必须保持连接才能触发 onaudioprocess
+
+          localProcessor.onaudioprocess = function (ev) {
+            if (!t0) return;
+            var input = ev.inputBuffer.getChannelData(0);
+            var pcm = new Int16Array(input.length);
+            for (var k = 0; k < input.length; k++) {
+              var s = Math.max(-1, Math.min(1, input[k]));
+              pcm[k] = s < 0 ? s * 0x8000 : s * 0x7fff;
+            }
+            pcmChunks.push(pcm.buffer);
+          };
+
+          // 静默检测
           var data = new Uint8Array(localAnalyser.fftSize);
           localMonitorTimer = setInterval(function () {
             if (!localAnalyser || !t0) return;
@@ -1074,12 +1102,12 @@
       var editUIShown = false;
       (function () {
         var voiceBtn = $('#journeyVoice');
-        var mediaRecorder = null;
         var stream = null;
-        var chunks = [];
+        var pcmChunks = [];
         var ended = false;
         var starting = false;
         var audioContext = null;
+        var processor = null;
         var analyser = null;
         var monitorTimer = null;
         var quietSince = 0;
@@ -1087,40 +1115,11 @@
 
         function stopPauseMonitor() {
           if (monitorTimer) { clearInterval(monitorTimer); monitorTimer = null; }
+          if (processor) { try { processor.disconnect(); } catch (e) {} processor = null; }
+          if (analyser) { try { analyser.disconnect(); } catch (e) {} analyser = null; }
           if (audioContext) { try { audioContext.close(); } catch (e) {} audioContext = null; }
-          analyser = null; quietSince = 0;
+          quietSince = 0;
           var pause = $('#recPause'); pause.classList.remove('is-visible'); pause.textContent = '';
-        }
-
-        function monitorPauses(s) {
-          try {
-            audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            analyser = audioContext.createAnalyser(); analyser.fftSize = 512;
-            audioContext.createMediaStreamSource(s).connect(analyser);
-            var data = new Uint8Array(analyser.fftSize);
-            monitorTimer = setInterval(function () {
-              if (!analyser || ended) return;
-              analyser.getByteTimeDomainData(data);
-              var sum = 0;
-              for (var j = 0; j < data.length; j++) { var n = (data[j] - 128) / 128; sum += n * n; }
-              var rms = Math.sqrt(sum / data.length);
-              if (rms < 0.035) {
-                if (!quietSince) quietSince = Date.now();
-                if (Date.now() - quietSince >= 5000) {
-                  doStop(null); // 沉默5秒，自动结束录音
-                  return;
-                }
-                if (Date.now() - quietSince >= 3500) {
-                  var pause = $('#recPause');
-                  pause.textContent = pauseIndex++ % 2 ? '然后呢？' : '嗯……';
-                  pause.classList.add('is-visible');
-                }
-              } else {
-                quietSince = 0;
-                $('#recPause').classList.remove('is-visible');
-              }
-            }, 200);
-          } catch (e) {}
         }
 
         function releaseMic() {
@@ -1129,19 +1128,18 @@
             stream = null;
           }
           stopPauseMonitor();
-          if (mediaRecorder) { mediaRecorder = null; }
           voiceBtn.disabled = false;
           starting = false;
         }
 
         function start(e) {
           e.preventDefault();
-          if (starting || mediaRecorder && mediaRecorder.state === 'recording') return;
+          if (starting) return;
           if (e.pointerId !== undefined && voiceBtn.setPointerCapture) {
             try { voiceBtn.setPointerCapture(e.pointerId); } catch (ignored) {}
           }
           starting = true;
-          chunks = [];
+          pcmChunks = [];
           ended = false;
           editUIShown = false;
           journeyVoiceExample.hidden = true;
@@ -1149,11 +1147,10 @@
           journeyVoiceHint.hidden = true;
           stopVoiceQuoteCarousel();
           voiceBtn.classList.add('is-holding');
-          // 记忆旅程录音不显示整屏浮层，仅保留爪子按钮的录音状态。
           recOverlay.hidden = true;
           $('#journeyVoiceLabel').textContent = '正在听…说完自动结束';
 
-          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
+          if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             ended = true;
             starting = false;
             voiceBtn.classList.remove('is-holding');
@@ -1170,12 +1167,56 @@
               starting = false;
               if (ended) { s.getTracks().forEach(function (t) { t.stop(); }); return; }
               stream = s;
-              monitorPauses(s);
-              var mime = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm'
-                : (MediaRecorder.isTypeSupported('audio/mp4') ? 'audio/mp4' : 'audio/ogg');
-              mediaRecorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
-              mediaRecorder.ondataavailable = function (ev) { if (ev.data && ev.data.size > 0) chunks.push(ev.data); };
-              mediaRecorder.start();
+              // AudioContext 必须在同步回调内创建，iOS 要求如此
+              audioContext = new (window.AudioContext || window.webkitAudioContext)();
+              var src = audioContext.createMediaStreamSource(s);
+
+              // 分析器用于静默检测
+              analyser = audioContext.createAnalyser();
+              analyser.fftSize = 512;
+              src.connect(analyser);
+
+              // 直接采集原始 PCM，绕过 MediaRecorder 避免容器格式损坏
+              processor = audioContext.createScriptProcessor(4096, 1, 1);
+              src.connect(processor);
+              processor.connect(audioContext.destination); // 必须保持连接才能触发 onaudioprocess
+
+              processor.onaudioprocess = function (ev) {
+                if (!starting) return; // 已停止后不再采集
+                var input = ev.inputBuffer.getChannelData(0);
+                var pcm = new Int16Array(input.length);
+                for (var k = 0; k < input.length; k++) {
+                  var v = Math.max(-1, Math.min(1, input[k]));
+                  pcm[k] = v < 0 ? v * 0x8000 : v * 0x7fff;
+                }
+                pcmChunks.push(pcm.buffer);
+              };
+
+              // 静默检测
+              var data = new Uint8Array(analyser.fftSize);
+              monitorTimer = setInterval(function () {
+                if (!analyser || ended) return;
+                analyser.getByteTimeDomainData(data);
+                var sum = 0;
+                for (var j = 0; j < data.length; j++) { var n = (data[j] - 128) / 128; sum += n * n; }
+                var rms = Math.sqrt(sum / data.length);
+                if (rms < 0.035) {
+                  if (!quietSince) quietSince = Date.now();
+                  if (Date.now() - quietSince >= 5000) {
+                    doStop(null);
+                    return;
+                  }
+                  if (Date.now() - quietSince >= 3500) {
+                    var pause = $('#recPause');
+                    pause.textContent = pauseIndex++ % 2 ? '然后呢？' : '嗯……';
+                    pause.classList.add('is-visible');
+                  }
+                } else {
+                  quietSince = 0;
+                  $('#recPause').classList.remove('is-visible');
+                }
+              }, 200);
+
               voiceBtn.disabled = false;
             })
             .catch(function () {
@@ -1206,45 +1247,42 @@
           stopVoiceQuoteCarousel();
           recOverlay.hidden = true;
 
-          if (!mediaRecorder || mediaRecorder.state === 'inactive') {
+          if (!pcmChunks.length) {
             releaseMic();
             $('#journeyVoiceLabel').textContent = '太短了，再按一次';
             setTimeout(function () { $('#journeyVoiceLabel').textContent = GUIDE_TEXT.name; }, 2000);
             return;
           }
 
-          var dur = 0; // 不再依赖时长判断，统一处理
-          var mimeType = mediaRecorder.mimeType || 'audio/webm';
-          mediaRecorder.onstop = function () {
-            releaseMic();
-            $('#journeyVoiceLabel').textContent = '正在转写…';
-            var blob = new Blob(chunks, { type: mimeType });
-            if (!blob.size) {
-              $('#journeyVoiceLabel').textContent = '没录到声音，再试一次';
-              setTimeout(function () { $('#journeyVoiceLabel').textContent = GUIDE_TEXT.name; }, 2000);
-              return;
-            }
-            recognizeByTencentASR(blob, function (text, isFinal) {
-              if (!text || !text.trim()) return;
-              if (!isFinal) {
-                // 中间识别结果不显示，避免在爪子下方出现额外提示。
-                return;
-              }
-              if (editUIShown) return;
-              editUIShown = true;
-              journeyVoiceExample.hidden = false;
-              journeyVoiceExample.textContent = text;
-              $('#journeyVoiceLabel').textContent = isFinal ? '想起来一点了…' : '正在听…';
-              typeVoiceText(text, function () { processVoiceInput(text); });
-            }, function (errMsg) {
-              editUIShown = false;
-              voiceBtn.disabled = false;
-              $('#journeyVoiceLabel').textContent = errMsg + '，请再试一次';
-              setTimeout(function () { $('#journeyVoiceLabel').textContent = GUIDE_TEXT.name; }, 3000);
-            });
-          };
+          // 合并 PCM chunks（每个 chunk 已经是 16kHz mono Int16）
+          var totalBytes = 0;
+          for (var c = 0; c < pcmChunks.length; c++) totalBytes += pcmChunks[c].byteLength;
+          var pcmBuf = new ArrayBuffer(totalBytes);
+          var view = new Uint8Array(pcmBuf);
+          var off = 0;
+          for (var c2 = 0; c2 < pcmChunks.length; c2++) {
+            var chunk = new Uint8Array(pcmChunks[c2]);
+            view.set(chunk, off); off += chunk.byteLength;
+          }
+          var blob = new Blob([pcmBuf], { type: 'audio/wav' });
 
-          try { mediaRecorder.stop(); } catch (e) {}
+          releaseMic();
+          $('#journeyVoiceLabel').textContent = '正在转写…';
+          recognizeByTencentASR(blob, function (text, isFinal) {
+            if (!text || !text.trim()) return;
+            if (!isFinal) return;
+            if (editUIShown) return;
+            editUIShown = true;
+            journeyVoiceExample.hidden = false;
+            journeyVoiceExample.textContent = text;
+            $('#journeyVoiceLabel').textContent = '想起来一点了…';
+            typeVoiceText(text, function () { processVoiceInput(text); });
+          }, function (errMsg) {
+            editUIShown = false;
+            voiceBtn.disabled = false;
+            $('#journeyVoiceLabel').textContent = errMsg + '，请再试一次';
+            setTimeout(function () { $('#journeyVoiceLabel').textContent = GUIDE_TEXT.name; }, 3000);
+          });
         }
 
         // 引导提示：告诉用户该说什么
