@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>记忆家园 Memory Home</title>
+<title>Puppyland</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500&family=Noto+Serif+SC:wght@300;400;500&family=Nunito:wght@400;600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500&family=Noto+Serif+SC:wght@300;400;500&family=Nunito:wght@400;600&family=Schoolbell&display=swap">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -29,26 +29,15 @@
     <div class="grain" aria-hidden="true"></div>
     <div class="vignette" aria-hidden="true"></div>
 
-    <!-- ── 场景 0：开场 ─────────────────────────────── -->
-    <section class="scene" data-scene="intro" aria-label="开场">
-      <div class="world intro-world">
-        <div class="intro-fragments" aria-hidden="true">
-          <span class="frag frag-ball"></span>
-          <span class="frag frag-bowl"></span>
-          <span class="frag frag-collar"></span>
-        </div>
-        <div class="intro-paws" id="introPaws" aria-hidden="true"></div>
-        <div class="door" aria-hidden="true">
-          <div class="door-frame"></div>
-          <div class="door-light"></div>
-          <div class="door-panel"></div>
-        </div>
+    <!-- ── 品牌开屏 ─────────────────────────────────── -->
+    <section class="scene splash-screen" data-scene="splash" aria-label="Puppyland 开屏">
+      <div class="splash-center" aria-hidden="true">
+        <img src="assets/puppyland-mark.png" alt="">
       </div>
-      <div class="dock intro-dock">
-        <p class="narration serif" id="introLine"></p>
-        <button class="ghost-btn" id="introEnter" type="button" hidden>推开门</button>
+      <div class="splash-brand" aria-label="Puppyland">
+        <img src="assets/puppyland-mark.png" alt="">
+        <span>Puppyland</span>
       </div>
-      <button class="skip" id="skipIntro" type="button">跳过</button>
     </section>
 
     <!-- ── 第二阶段：连续叙事式记忆旅程 ───────────────── -->
@@ -63,6 +52,7 @@
         <div class="pet-slot journey-pet" id="journeyPet">
           <img class="pet" src="assets/pet-idle.webp" alt="正在找回自己的小狗">
         </div>
+        <video class="journey-group-video" id="journeyGroupVideo" src="assets/puppy-group-bridge.mp4" muted playsinline preload="auto" aria-label="小狗们一起走过彩虹桥"></video>
       </div>
       <div class="journey-progress" id="journeyProgress" aria-label="记忆旅程足迹"></div>
       <div class="journey-card" id="journeyCard">
@@ -76,23 +66,33 @@
           <span class="journey-voice-label" id="journeyVoiceLabel">按住爪子，说说你记忆里的 TA 吧</span>
         </div>
         <div class="journey-confirm" id="journeyConfirm" hidden>
-          <div class="journey-confirm-pet"><img id="journeyConfirmPet" src="assets/pet-idle.webp" alt="生成的小狗形象"></div>
           <div class="journey-confirm-tools">
-            <span>你可以补充照片，让我再靠近一点。</span>
-            <label class="journey-add-photo" aria-label="上传图片重新生成"><input id="journeyRegeneratePhoto" type="file" accept="image/*"><span>＋</span></label>
+            <p>照片会帮助我更快找回自己的样子。</p>
+            <label class="journey-add-photo" aria-label="补充照片，让小狗更像记忆里的样子">
+              <input id="journeyRegeneratePhoto" type="file" accept="image/*">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#camera"></use></svg>
+              <span>补充照片</span>
+            </label>
           </div>
-          <button class="primary-btn journey-confirm-btn" id="journeyConfirmBtn" type="button">就是这个样子</button>
+          <button class="ghost-btn journey-confirm-btn" id="journeyConfirmBtn" type="button">暂时跳过</button>
         </div>
       </div>
     </section>
 
-    <!-- ── 家园生成 ─────────────────────────────────── -->
-    <section class="scene" data-scene="weave" aria-label="家园正在成形">
-      <div class="world weave-world">
-        <svg class="house-draw" viewBox="0 0 300 320" aria-hidden="true">
-          <path id="houseOutline" d="M40 300V128L150 34l110 94v172H40Z" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round" stroke-linecap="round"/>
-        </svg>
-        <div class="weave-paws" id="weavePaws" aria-hidden="true"></div>
+    <!-- ── 从狗狗社区进入属于 TA 的家 ────────────────── -->
+    <section class="scene neighborhood-scene" data-scene="weave" aria-label="寻找属于小狗的家">
+      <div class="neighborhood-camera" aria-hidden="true">
+        <div class="neighborhood-map">
+          <img src="assets/puppy-neighborhood.jpg" alt="">
+          <i class="neighbor-light light-one"></i>
+          <i class="neighbor-light light-two"></i>
+          <i class="neighbor-light light-three"></i>
+          <div class="chosen-home">
+            <span class="chosen-halo"></span>
+            <svg viewBox="0 0 26 26"><use href="#paw"></use></svg>
+          </div>
+        </div>
+        <div class="neighborhood-wash"></div>
       </div>
       <div class="dock">
         <p class="narration serif" id="nWeave"></p>
@@ -107,17 +107,19 @@
       <button class="home-hotspot home-mailbox" id="homeMailbox" type="button" aria-label="打开信箱，阅读今天的来信"></button>
       <button class="home-hotspot home-bowl" id="homeBowl" type="button" aria-label="点击饭盆"></button>
       <button class="home-hotspot home-pet" id="homePet" type="button" aria-label="和小狗说说话"></button>
-      <p class="home-note" id="homeNote" role="status" aria-live="polite"></p>
+      <p class="home-bubble" id="homeNote" role="status" aria-live="polite"></p>
     </section>
 
     <!-- ── 读信子页面 ───────────────────────────────── -->
     <section class="scene letter-page" data-scene="letter" aria-label="今天的来信">
       <section class="letter-sheet" id="letterSheet" aria-labelledby="letterTitle" hidden>
         <button class="letter-close" id="letterClose" type="button" aria-label="回到家">×</button>
-        <p class="letter-date" id="letterDate"></p>
-        <h2 id="letterTitle">今天的信</h2>
-        <div class="letter-body" id="letterBody"></div>
-        <p class="letter-sign" id="letterSign"></p>
+        <div class="letter-reading">
+          <p class="letter-date" id="letterDate"></p>
+          <h2 id="letterTitle">今天的信</h2>
+          <div class="letter-body" id="letterBody"></div>
+          <p class="letter-sign" id="letterSign"></p>
+        </div>
       </section>
     </section>
 
@@ -152,7 +154,7 @@
     </div>
   </div>
 
-  <p class="stage-note">键盘 <kbd>1</kbd> 开场 · <kbd>2</kbd> 记忆旅程 · <kbd>3</kbd> 家园 · <kbd>4</kbd> 对话 · <kbd>R</kbd> 重来</p>
+  <p class="stage-note">键盘 <kbd>1</kbd> 召回 · <kbd>2</kbd> 记忆旅程 · <kbd>3</kbd> 家园 · <kbd>4</kbd> 对话 · <kbd>R</kbd> 重来</p>
 </div>
 
 <script src="app.js"></script>

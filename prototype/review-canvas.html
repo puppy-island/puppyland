@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Puppyland 批注画布</title>
+<style>
+  :root{font-family:"PingFang SC","Noto Sans SC",system-ui,sans-serif;color:#4b3a2e;background:#b99b76}
+  *{box-sizing:border-box}
+  html,body{width:100%;height:100%;margin:0;overflow:hidden}
+  button,textarea{font:inherit}
+  .review-shell{position:relative;width:100%;height:100%;overflow:hidden;background:radial-gradient(circle at 50% 0,#d8c09f,#aa8861)}
+  .review-toolbar{position:absolute;z-index:30;left:50%;top:18px;transform:translateX(-50%);display:flex;align-items:center;gap:7px;padding:8px 10px;border:1px solid rgba(255,255,255,.4);border-radius:16px;background:rgba(251,242,224,.92);box-shadow:0 10px 30px rgba(71,48,29,.22);backdrop-filter:blur(16px)}
+  .review-title{padding:0 10px 0 5px;font-size:14px;font-weight:500;white-space:nowrap}
+  .review-toolbar button{height:34px;padding:0 12px;border:1px solid rgba(91,66,45,.15);border-radius:10px;color:#604b3b;background:#fff8ea;cursor:pointer}
+  .review-toolbar button[aria-pressed="true"]{color:#fff;background:#c87c5c;border-color:#c87c5c}
+  .review-toolbar .icon{width:34px;padding:0;font-size:18px}
+  .zoom-label{min-width:44px;text-align:center;font-size:12px;color:#806a58}
+  .review-viewport{position:absolute;inset:0;overflow:hidden;cursor:grab;touch-action:none}
+  .review-viewport.is-panning{cursor:grabbing}
+  .review-board{position:absolute;left:0;top:0;width:1980px;height:1430px;transform-origin:0 0;background-color:#ead7ba;background-image:radial-gradient(rgba(111,82,57,.14) 1px,transparent 1px);background-size:24px 24px;box-shadow:0 20px 80px rgba(60,39,22,.24)}
+  .board-heading{position:absolute;left:70px;top:54px}
+  .board-heading h1{margin:0 0 7px;font-size:28px;font-weight:500;letter-spacing:.02em}
+  .board-heading p{margin:0;color:#8b725e;font-size:14px}
+  .screen-card{position:absolute;width:300px;height:610px;padding:36px 10px 10px;border-radius:27px;background:#f8ecd5;box-shadow:0 16px 35px rgba(76,52,34,.17)}
+  .screen-card h2{position:absolute;top:10px;left:16px;margin:0;font-size:13px;font-weight:500;color:#705846}
+  .screen-card img{display:block;width:280px;height:560px;border:0;border-radius:20px;background:#e7cfaa;object-fit:contain;pointer-events:none}
+  .screen-card::after{content:attr(data-step);position:absolute;right:15px;top:10px;color:#b39579;font-size:12px}
+  .s1{left:70px;top:140px}.s2{left:450px;top:140px}.s3{left:830px;top:140px}.s4{left:1210px;top:140px}.s5{left:1590px;top:140px}
+  .s6{left:260px;top:790px}.s7{left:640px;top:790px}.s8{left:1020px;top:790px}.s9{left:1400px;top:790px}
+  .flow-arrow{position:absolute;height:2px;background:#c5a283;transform-origin:left center;opacity:.75}
+  .flow-arrow::after{content:"";position:absolute;right:-1px;top:-4px;border-left:8px solid #c5a283;border-top:5px solid transparent;border-bottom:5px solid transparent}
+  .a1{left:380px;top:445px;width:60px}.a2{left:760px;top:445px;width:60px}.a3{left:1140px;top:445px;width:60px}.a4{left:1520px;top:445px;width:60px}
+  .a6{left:570px;top:1095px;width:60px}.a7{left:950px;top:1095px;width:60px}.a8{left:1330px;top:1095px;width:60px}
+  .annotation-layer{position:absolute;inset:0;z-index:15;pointer-events:none}
+  .review-board.note-mode .annotation-layer{pointer-events:auto;cursor:crosshair}
+  .note{position:absolute;width:210px;min-height:132px;padding:35px 12px 12px;border:1px solid rgba(138,88,56,.22);border-radius:5px;background:#fff2a8;box-shadow:0 9px 20px rgba(76,52,34,.2);transform:rotate(-1deg);pointer-events:auto;cursor:default}
+  .note:nth-child(even){background:#f8cfc0;transform:rotate(1.2deg)}
+  .note-handle{position:absolute;left:0;right:0;top:0;height:30px;padding:7px 10px;color:#9a7658;font-size:11px;cursor:grab;user-select:none}
+  .note textarea{display:block;width:100%;min-height:82px;resize:vertical;border:0;outline:0;color:#553f31;background:transparent;line-height:1.55}
+  .note-delete{position:absolute;right:5px;top:4px;width:25px;height:25px;border:0;border-radius:50%;color:#8a6651;background:transparent;cursor:pointer}
+  .canvas-tip{position:absolute;z-index:25;left:20px;bottom:18px;padding:9px 12px;border-radius:10px;color:#f9ecda;background:rgba(72,53,39,.72);font-size:12px;pointer-events:none}
+  @media(max-width:720px){.review-toolbar{left:12px;right:12px;transform:none;overflow-x:auto}.review-title{display:none}.review-toolbar button{white-space:nowrap}.canvas-tip{display:none}}
+</style>
+</head>
+<body>
+<main class="review-shell">
+  <nav class="review-toolbar" aria-label="画布工具">
+    <span class="review-title">Puppyland 评审画布</span>
+    <button id="moveTool" type="button" aria-pressed="true">移动画布</button>
+    <button id="noteTool" type="button" aria-pressed="false">＋ 添加批注</button>
+    <button class="icon" id="zoomOut" type="button" aria-label="缩小">−</button>
+    <span class="zoom-label" id="zoomLabel">55%</span>
+    <button class="icon" id="zoomIn" type="button" aria-label="放大">＋</button>
+    <button id="resetView" type="button">回到全景</button>
+    <button id="clearNotes" type="button">清空批注</button>
+  </nav>
+  <div class="review-viewport" id="viewport">
+    <div class="review-board" id="board">
+      <header class="board-heading"><h1>从相遇到回家</h1><p>点击“添加批注”，再点击画布任意位置即可留言</p></header>
+      <article class="screen-card s1" data-step="01"><h2>Puppyland 开屏</h2><img alt="Puppyland 开屏" src="assets/review-shots/01-splash.png"></article>
+      <article class="screen-card s2" data-step="02"><h2>语音输入</h2><img alt="语音输入" src="assets/review-shots/04-recall.png"></article>
+      <article class="screen-card s3" data-step="03"><h2>补充照片</h2><img alt="补充照片" src="assets/review-shots/05-confirm.png"></article>
+      <article class="screen-card s4" data-step="04"><h2>好像想起来一点了</h2><img alt="好像想起来一点了" src="assets/review-shots/06-memory.png"></article>
+      <article class="screen-card s5" data-step="05"><h2>一些画面开始浮现</h2><img alt="一些画面开始浮现" src="assets/review-shots/07-swim.png"></article>
+      <article class="screen-card s6" data-step="06"><h2>花卷走过彩虹桥</h2><img alt="花卷走过彩虹桥" src="assets/review-shots/08-bridge.png"></article>
+      <article class="screen-card s7" data-step="07"><h2>狗狗社区全景</h2><img alt="狗狗社区全景" src="assets/review-shots/09-neighborhood.png"></article>
+      <article class="screen-card s8" data-step="08"><h2>选中属于 TA 的家</h2><img alt="选中属于 TA 的家" src="assets/review-shots/10-home-choice.png"></article>
+      <article class="screen-card s9" data-step="09"><h2>家的内部</h2><img alt="家的内部" src="assets/review-shots/11-home.png"></article>
+      <i class="flow-arrow a1"></i><i class="flow-arrow a2"></i><i class="flow-arrow a3"></i><i class="flow-arrow a4"></i>
+      <i class="flow-arrow a6"></i><i class="flow-arrow a7"></i><i class="flow-arrow a8"></i>
+      <div class="annotation-layer" id="annotationLayer" aria-label="批注区域"></div>
+    </div>
+  </div>
+  <p class="canvas-tip">拖动空白处移动 · 滚轮缩放 · 批注会自动保存在这台电脑</p>
+</main>
+<script>
+(function(){
+  var viewport=document.getElementById('viewport'),board=document.getElementById('board'),layer=document.getElementById('annotationLayer');
+  var moveTool=document.getElementById('moveTool'),noteTool=document.getElementById('noteTool'),zoomLabel=document.getElementById('zoomLabel');
+  var state={x:22,y:70,scale:.55,tool:'move'},drag=null,notes=[];
+  try{state.notes=JSON.parse(localStorage.getItem('puppyland.review.notes')||'[]');}catch(e){state.notes=[];}
+  function apply(){board.style.transform='translate('+state.x+'px,'+state.y+'px) scale('+state.scale+')';zoomLabel.textContent=Math.round(state.scale*100)+'%';}
+  function save(){localStorage.setItem('puppyland.review.notes',JSON.stringify(state.notes));}
+  function setTool(tool){state.tool=tool;board.classList.toggle('note-mode',tool==='note');moveTool.setAttribute('aria-pressed',tool==='move');noteTool.setAttribute('aria-pressed',tool==='note');}
+  function renderNotes(){
+    layer.innerHTML='';
+    state.notes.forEach(function(data){
+      var note=document.createElement('section');note.className='note';note.style.left=data.x+'px';note.style.top=data.y+'px';note.dataset.id=data.id;
+      note.innerHTML='<div class="note-handle">拖动批注</div><button class="note-delete" type="button" aria-label="删除批注">×</button><textarea aria-label="批注内容" placeholder="写下你的意见……"></textarea>';
+      var area=note.querySelector('textarea');area.value=data.text||'';
+      area.addEventListener('input',function(){data.text=area.value;save();});
+      note.querySelector('.note-delete').addEventListener('click',function(e){e.stopPropagation();state.notes=state.notes.filter(function(n){return n.id!==data.id;});save();renderNotes();});
+      note.querySelector('.note-handle').addEventListener('pointerdown',function(e){e.stopPropagation();drag={kind:'note',id:data.id,startX:e.clientX,startY:e.clientY,x:data.x,y:data.y};e.currentTarget.setPointerCapture(e.pointerId);});
+      layer.appendChild(note);
+    });
+  }
+  function boardPoint(e){var rect=viewport.getBoundingClientRect();return{x:(e.clientX-rect.left-state.x)/state.scale,y:(e.clientY-rect.top-state.y)/state.scale};}
+  layer.addEventListener('pointerdown',function(e){
+    if(state.tool!=='note'||e.target!==layer)return;
+    var p=boardPoint(e),note={id:Date.now(),x:Math.max(0,p.x-25),y:Math.max(0,p.y-25),text:''};state.notes.push(note);save();renderNotes();
+    var created=layer.querySelector('[data-id="'+note.id+'"] textarea');if(created)created.focus();
+  });
+  viewport.addEventListener('pointerdown',function(e){if(state.tool!=='move'||e.target.closest('.note')||e.target.closest('.review-toolbar'))return;drag={kind:'board',startX:e.clientX,startY:e.clientY,x:state.x,y:state.y};viewport.classList.add('is-panning');viewport.setPointerCapture(e.pointerId);});
+  window.addEventListener('pointermove',function(e){if(!drag)return;if(drag.kind==='board'){state.x=drag.x+e.clientX-drag.startX;state.y=drag.y+e.clientY-drag.startY;apply();}else{var n=state.notes.find(function(item){return item.id===drag.id;});if(n){n.x=drag.x+(e.clientX-drag.startX)/state.scale;n.y=drag.y+(e.clientY-drag.startY)/state.scale;var el=layer.querySelector('[data-id="'+n.id+'"]');if(el){el.style.left=n.x+'px';el.style.top=n.y+'px';}}}});
+  window.addEventListener('pointerup',function(){if(drag&&drag.kind==='note')save();drag=null;viewport.classList.remove('is-panning');});
+  function zoom(next,cx,cy){var old=state.scale;next=Math.max(.28,Math.min(1.25,next));var px=(cx-state.x)/old,py=(cy-state.y)/old;state.scale=next;state.x=cx-px*next;state.y=cy-py*next;apply();}
+  viewport.addEventListener('wheel',function(e){e.preventDefault();var rect=viewport.getBoundingClientRect();zoom(state.scale*(e.deltaY>0?.9:1.1),e.clientX-rect.left,e.clientY-rect.top);},{passive:false});
+  moveTool.addEventListener('click',function(){setTool('move');});noteTool.addEventListener('click',function(){setTool('note');});
+  document.getElementById('zoomIn').addEventListener('click',function(){zoom(state.scale*1.15,viewport.clientWidth/2,viewport.clientHeight/2);});
+  document.getElementById('zoomOut').addEventListener('click',function(){zoom(state.scale*.87,viewport.clientWidth/2,viewport.clientHeight/2);});
+  document.getElementById('resetView').addEventListener('click',function(){state.x=22;state.y=70;state.scale=Math.min(.55,(viewport.clientWidth-40)/1980);apply();});
+  document.getElementById('clearNotes').addEventListener('click',function(){if(!state.notes.length||confirm('确定清空全部批注吗？')){state.notes=[];save();renderNotes();}});
+  state.scale=Math.min(.55,(viewport.clientWidth-40)/1980);apply();renderNotes();setTool('move');
+})();
+</script>
+</body>
+</html>

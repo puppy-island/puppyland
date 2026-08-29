@@ -11,6 +11,7 @@
   var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
   var pick = function (a) { return a[Math.floor(Math.random() * a.length)]; };
   var stage = $('#stage');
+  var REVIEW_MODE = new URLSearchParams(location.search).has('reviewScene');
 
   /* ────────────────────────────────────────────────────────────────────
      1. 状态（对应 PRD §7 数据与状态）
@@ -21,7 +22,7 @@
   var API_ORIGIN = API_BASE.replace(/\/api\/v1\/?$/, '');
 
   var S = {
-    scene: 'intro',
+    scene: 'journey',
     petName: '',
     hasPhoto: false,
     detail: 0,                      // 形象清晰度 0–1，信息不足即保持低细节 Base 形象
@@ -50,6 +51,7 @@
   };
 
   function save() {
+    if (REVIEW_MODE) return;
     try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {}
   }
   function load() {
@@ -431,41 +433,21 @@
       scenes[k].classList.toggle('is-active', isTarget);
       scenes[k].classList.toggle('is-leaving', !isTarget);
     });
-    S.scene = name; save();
+    S.scene = name;
+    stage.classList.toggle('is-splash', name === 'splash');
+    if (name !== 'splash') save();
     if (SCENE_INIT[name]) SCENE_INIT[name]();
   }
 
-  /* ── 场景 0：开场（6–10 秒，可跳过） ─────────────────────────────── */
-  function initIntro() {
-    var host = $('#introPaws');
-    if (host.childElementCount) return;
-    var pts = [[14, 82], [26, 74], [22, 63], [34, 55], [30, 44], [44, 36], [40, 25]];
-    pts.forEach(function (p, i) {
-      var wrap = document.createElement('div');
-      wrap.innerHTML = pawSvg();
-      var svg = wrap.firstChild;
-      svg.style.position = 'absolute';
-      svg.style.left = p[0] + '%';
-      svg.style.top = p[1] + '%';
-      svg.style.width = svg.style.height = (20 + (i % 2) * 5) + 'px';
-      svg.style.transform = 'rotate(' + (-24 + i * 7) + 'deg)';
-      svg.style.animationDelay = (0.25 + i * 0.42) + 's';
-      host.appendChild(svg);
-    });
-
-    var line = $('#introLine');
-    say(line, '<span class="dim">有一串脚印，在暗处亮了一下。</span>', 900);
-    say(line, '<span class="dim">熟悉的东西从旁边掠过去。</span>', 3400);
-    setTimeout(function () { $('.door').classList.add('is-open'); }, 5200);
-    say(line, '跟着 TA 走过的地方，再走一次。', 6000);
+  var startupDestination = 'journey';
+  function initSplash() {
+    var splash = scenes.splash;
+    if (splash.dataset.ready) return;
+    splash.dataset.ready = '1';
     setTimeout(function () {
-      var b = $('#introEnter');
-      b.hidden = false;
-      b.addEventListener('click', function () { goto('journey'); }, { once: true });
-    }, 7200);
-    setTimeout(function () { if (S.scene === 'intro') goto('journey'); }, 11000);
+      if (S.scene === 'splash') goto(startupDestination);
+    }, 2400);
   }
-  $('#skipIntro').addEventListener('click', function () { goto('journey'); });
 
   /* ── 第二阶段：JourneyPage / 连续叙事式记忆旅程 ─────────────────── */
   var JOURNEY_NODES = [
@@ -480,6 +462,8 @@
   var journeyCreator = $('#journeyCreator');
   var journeyConfirm = $('#journeyConfirm');
   var journeyTimer = null;
+  var rainbowGroupTimer = null;
+  var rainbowExitTimer = null;
 
   function journeyPersonalized(node) {
     var voice = S.journey.voiceDescription || '';
@@ -515,14 +499,16 @@
 
   function journeyWorldLevel() {
     journeyWorld.dataset.level = String(S.journey.worldLevel || 0);
-    var creating = S.journey.stage === 'PET_CREATION' || S.journey.stage === 'PET_CONFIRM';
+    var creating = S.journey.stage === 'PET_CREATION' || S.journey.stage === 'PHOTO_INPUT';
+    var crossing = S.journey.stage === 'RAINBOW_BRIDGE' || S.journey.stage === 'GROUP_BRIDGE';
     journeyWorld.dataset.sceneIndex = String(S.journey.sceneIndex || 0);
-    journeyWorld.dataset.state = creating ? 'creation' : S.journey.stage === 'RAINBOW_BRIDGE' ? 'rainbow' : 'swimming';
+    journeyWorld.dataset.state = creating ? 'creation' : crossing ? 'rainbow' : 'swimming';
     journeyWorld.classList.toggle('is-swimming', !creating);
     journeyCard.dataset.state = creating ? 'creation' : 'story';
     journeyCard.classList.toggle('is-over-water', !creating);
     journeyCard.classList.toggle('is-creating', creating);
-    journeyWorld.classList.toggle('is-rainbow', S.journey.stage === 'RAINBOW_BRIDGE');
+    journeyCard.classList.toggle('is-confirming', S.journey.stage === 'PHOTO_INPUT');
+    journeyWorld.classList.toggle('is-rainbow', crossing);
     journeyWorld.classList.toggle('is-running', S.journey.stage === 'RUNNING');
   }
 
@@ -567,13 +553,47 @@
   function journeyRainbow() {
     S.journey.stage = 'RAINBOW_BRIDGE';
     S.journey.sceneIndex = 2;
-    S.journey.petCompletion = 1; S.journey.worldLevel = 5; setDetail(1);
+    S.journey.petCompletion = 0.72; S.journey.worldLevel = 5; setDetail(0.4);
     journeyCardReset();
     $('#journeyKicker').textContent = '彩虹桥';
     $('#journeyTitle').textContent = (S.petName || 'TA') + '要走过彩虹桥了。';
     $('#journeyCopy').textContent = '你刚才说起的那些记忆，正在前面汇成一束光。';
-    $('.pet', $('#journeyPet')).src = POSE.run;
+    var groupVideo = $('#journeyGroupVideo');
+    journeyWorld.classList.remove('is-group-crossing');
+    try { groupVideo.pause(); groupVideo.currentTime = 0; } catch (e) {}
     journeyWorldLevel(); journeyProgress(); save();
+    clearTimeout(journeyTimer); clearTimeout(rainbowGroupTimer); clearTimeout(rainbowExitTimer);
+    rainbowGroupTimer = setTimeout(function () {
+      if (S.scene !== 'journey' || S.journey.stage !== 'RAINBOW_BRIDGE') return;
+      S.journey.stage = 'GROUP_BRIDGE';
+      journeyWorld.classList.add('is-group-crossing');
+      $('#journeyTitle').textContent = '别怕，大家都来陪你了。';
+      $('#journeyCopy').textContent = '一起走过这座桥，前面就是新的家。';
+      try { groupVideo.currentTime = 0; groupVideo.play(); } catch (e) {}
+      save();
+    }, 1900);
+    rainbowExitTimer = setTimeout(function () {
+      if (S.scene !== 'journey' || S.journey.stage !== 'GROUP_BRIDGE') return;
+      S.journey.stage = 'HOME_GENERATING';
+      journeyWorld.classList.remove('is-group-crossing');
+      goto('weave');
+    }, 7200);
+  }
+
+  function beginGeneratingJourney() {
+    S.journey.stage = 'RUNNING';
+    S.journey.sceneIndex = 0;
+    S.journey.currentMemoryIndex = 0;
+    S.journey.petCompletion = 0.2;
+    S.journey.worldLevel = 1;
+    S.journey.generationStartedAt = S.journey.generationStartedAt || Date.now();
+    setDetail(0.18);
+    journeyWorld.classList.add('is-running');
+    journeyCardReset();
+    $('#journeyKicker').textContent = '记忆旅程';
+    $('#journeyTitle').textContent = (S.petName || 'TA') + '，好像想起来一点了。';
+    $('#journeyCopy').textContent = '一个模糊的轮廓正在出现，真正的样子还在慢慢生成。';
+    journeyProgress(); journeyWorldLevel(); save();
     clearTimeout(journeyTimer);
   }
 
@@ -581,7 +601,7 @@
     if (!journeyWorld.dataset.bound) {
       journeyWorld.dataset.bound = '1';
       journeyWorld.addEventListener('click', function (e) {
-        if (S.journey.stage === 'PET_CREATION' || S.journey.stage === 'PET_CONFIRM') return;
+        if (S.journey.stage === 'PET_CREATION' || S.journey.stage === 'PHOTO_INPUT' || S.journey.stage === 'RAINBOW_BRIDGE' || S.journey.stage === 'GROUP_BRIDGE') return;
         if (S.journey.sceneIndex === 0) {
           S.journey.sceneIndex = 1; S.journey.worldLevel = 2;
           $('#journeyKicker').textContent = '记忆旅程'; $('#journeyTitle').textContent = '一些画面开始浮现。'; $('#journeyCopy').textContent = '再往前一点，彩虹桥就在前面。';
@@ -591,7 +611,7 @@
           S.journey.sceneIndex = 2; S.journey.stage = 'RAINBOW_BRIDGE'; S.journey.worldLevel = 5; setDetail(1);
           journeyRainbow(); return;
         }
-        if (S.journey.sceneIndex === 2) { S.journey.stage = 'HOME_GENERATING'; goto('weave'); }
+        if (S.journey.sceneIndex === 2) return;
       });
       $('#journeyVoice').addEventListener('click', function () {
         var voice = this;
@@ -602,11 +622,11 @@
           S.petName = S.petName || mockASR('name');
           S.journey.voiceDescription = mockASR('meet');
           S.journey.petImage = 'assets/pet-idle.webp';
-          S.hasPhoto = true;
+          S.journey.generationStartedAt = Date.now();
           interpret(S.journey.voiceDescription);
-          await ensureBackendPet();
-          S.journey.stage = 'PET_CONFIRM'; setDetail(0.35); journeyWorld.classList.remove('is-running'); journeyCardReset(); journeyConfirm.hidden = false;
-          $('#journeyKicker').textContent = ''; $('#journeyTitle').textContent = '我想起来啦'; $('#journeyCopy').textContent = '我是这样的一只小狗对嘛？';
+          ensureBackendPet();
+          S.journey.stage = 'PHOTO_INPUT'; setDetail(0); journeyWorld.classList.remove('is-running'); journeyCardReset(); journeyConfirm.hidden = false;
+          $('#journeyKicker').textContent = ''; $('#journeyTitle').textContent = (S.petName || 'TA') + '，再给我一张照片，也许我会想得更快一点。'; $('#journeyCopy').textContent = '也可以暂时跳过，我们先往前走。';
           journeyProgress(); journeyWorldLevel(); save();
           voice.disabled = false; voice.classList.remove('is-listening');
         }, 1100);
@@ -618,42 +638,30 @@
           S.journey.petReferenceImage = reader.result;
           S.journey.regenerationPrompt = [S.journey.voiceDescription, '根据补充照片校准外形'].filter(Boolean).join('；');
           S.journey.isRegenerating = true;
-          var pet = $('#journeyConfirmPet');
-          pet.classList.add('is-regenerating');
-          $('#journeyCopy').textContent = '正在根据照片和描述重新生成……';
+          $('#journeyCopy').textContent = '照片收好啦。我们继续往前走。';
           $('#journeyConfirmBtn').disabled = true;
-          await syncPetPhoto(file);
+          syncPetPhoto(file);
           setTimeout(function () {
-            // Mock 生成：真实接入时将 regenerationPrompt 与参考图传给生图服务。
-            var voice = S.journey.voiceDescription || '';
-            var pose = /跑|奔|活泼/.test(voice) ? POSE.approach : /躲|胆小|雨/.test(voice) ? POSE.down : POSE.idle;
-            pet.src = pose; pet.classList.remove('is-regenerating');
-            S.journey.petImage = pose; S.journey.isRegenerating = false; S.hasPhoto = true;
-            $('#journeyCopy').textContent = '照片和描述都记住了。这个样子更像你记忆里的我了吗？';
-            $('#journeyConfirmBtn').disabled = false; save();
-          }, 1500);
+            S.journey.isRegenerating = false; S.hasPhoto = true;
+            $('#journeyConfirmBtn').disabled = false;
+            beginGeneratingJourney();
+          }, 650);
         };
         reader.readAsDataURL(file);
       });
       $('#journeyConfirmBtn').addEventListener('click', function () {
-        $('.pet', $('#journeyPet')).src = S.journey.petImage || POSE.idle;
-        S.journey.stage = 'RUNNING'; S.journey.sceneIndex = 0; S.journey.currentMemoryIndex = 0; S.journey.petCompletion = 0.25; S.journey.worldLevel = 1;
-        setDetail(0.25); journeyWorld.classList.add('is-running'); journeyCardReset();
-        $('#journeyKicker').textContent = '记忆旅程'; $('#journeyTitle').textContent = (S.petName || 'TA') + '，好像想起来一点了。'; $('#journeyCopy').textContent = S.journey.voiceDescription ? '你说起的' + (S.journey.voiceDescription.slice(0, 20)) + '……正在水里慢慢回来。' : '跟着 TA 向前走，世界会一点点回来。';
-        journeyProgress(); journeyWorldLevel(); save();
-        clearTimeout(journeyTimer);
+        beginGeneratingJourney();
       });
     }
     var stage = S.journey.stage || 'PET_CREATION';
     if (stage === 'PET_CREATION') {
       journeyCardReset(); journeyCard.classList.remove('is-flowing'); journeyCreator.hidden = false;
       $('#journeyKicker').textContent = ''; $('#journeyTitle').innerHTML = '我好像……<br>记不清自己原来的样子了'; $('#journeyCopy').textContent = '你可以帮我想起来吗？';
-    } else if (stage === 'PET_CONFIRM') {
+    } else if (stage === 'PHOTO_INPUT') {
       journeyCardReset(); journeyCard.classList.remove('is-flowing'); journeyConfirm.hidden = false;
-      $('#journeyConfirmPet').src = S.journey.petImage || 'assets/pet-idle.webp';
-      $('#journeyKicker').textContent = ''; $('#journeyTitle').textContent = '我想起来啦'; $('#journeyCopy').textContent = '我是这样的一只小狗对嘛？';
+      $('#journeyKicker').textContent = ''; $('#journeyTitle').textContent = (S.petName || 'TA') + '，再给我一张照片，也许我会想得更快一点。'; $('#journeyCopy').textContent = '也可以暂时跳过，我们先往前走。';
     } else if (stage === 'MEMORY_INPUT' || stage === 'MEMORY_REVEAL' || stage === 'MEMORY_PROCESSING') journeyShowNode();
-    else if (stage === 'RAINBOW_BRIDGE') journeyRainbow();
+    else if (stage === 'RAINBOW_BRIDGE' || stage === 'GROUP_BRIDGE') journeyRainbow();
     else if (stage === 'RUNNING') { journeyCardReset(); journeyWorld.classList.add('is-running'); clearTimeout(journeyTimer); }
     journeyProgress(); journeyWorldLevel();
   }
@@ -671,28 +679,21 @@
     var w = scenes.weave;
     if (w.dataset.ready) return;
     w.dataset.ready = '1';
-    w.classList.add('is-drawing');
-
-    var host = $('#weavePaws');
-    for (var i = 0; i < 7; i++) {
-      var wrap = document.createElement('div');
-      wrap.innerHTML = pawSvg('is-lit');
-      var svg = wrap.firstChild;
-      svg.style.position = 'absolute';
-      svg.style.left = (10 + i * 12) + '%';
-      svg.style.bottom = (27 + Math.sin(i) * 3) + '%';
-      svg.style.opacity = 0;
-      svg.style.transition = 'opacity .8s ease';
-      host.appendChild(svg);
-      (function (s, k) { setTimeout(function () { s.style.opacity = 1; }, 300 + k * 260); })(svg, i);
-    }
 
     var n = $('#nWeave');
-    say(n, '<span class="dim">脚印一枚一枚，走回同一个地方。</span>', 500);
-    say(n, '<span class="dim">墙立起来了，灯挂上去了。</span>', 3200);
-    say(n, '家已经在这里了。', 5400);
+    setTimeout(function () { if (S.scene === 'weave') w.classList.add('is-settled'); }, 80);
+    say(n, '<span class="dim">原来，这里住着好多小狗。</span>', 650);
+    setTimeout(function () {
+      if (S.scene !== 'weave') return;
+      w.classList.add('is-chosen');
+      n.innerHTML = '这一间，会是 ' + (S.petName || 'TA') + ' 的家。';
+    }, 3100);
+    setTimeout(function () {
+      if (S.scene !== 'weave') return;
+      w.classList.add('is-entering');
+    }, 4850);
     syncHomeConfig();
-    setTimeout(function () { if (S.scene === 'weave') goto('home'); }, 7400);
+    setTimeout(function () { if (S.scene === 'weave') goto('home'); }, 7000);
   }
 
   /* ────────────────────────────────────────────────────────────────────
@@ -742,19 +743,31 @@
     save();
     return letter;
   }
-  function showHomeNote(text) {
+  var homeReactionTarget = null;
+  function showHomeReaction(target, text) {
     var note = $('#homeNote');
+    if (homeReactionTarget) homeReactionTarget.classList.remove('is-reacting');
+    homeReactionTarget = target || null;
+    if (homeReactionTarget) {
+      homeReactionTarget.classList.remove('is-reacting');
+      void homeReactionTarget.offsetWidth;
+      homeReactionTarget.classList.add('is-reacting');
+    }
     note.textContent = text;
     note.classList.add('is-visible');
     clearTimeout(homeNoteTimer);
-    homeNoteTimer = setTimeout(function () { note.classList.remove('is-visible'); }, 2600);
+    homeNoteTimer = setTimeout(function () {
+      note.classList.remove('is-visible');
+      if (homeReactionTarget) homeReactionTarget.classList.remove('is-reacting');
+      homeReactionTarget = null;
+    }, 2600);
   }
   function setHomeLights(on, announce) {
     S.story.homeLightsOn = on;
     S.story.petState = on ? 'idle' : 'down';
     homeHub.classList.toggle('is-lights-off', !on);
     $('#homeLamp').setAttribute('aria-label', on ? '关灯，让小狗休息' : '开灯，叫醒小狗');
-    if (announce) showHomeNote(on ? '灯亮起来了，TA 抬头看了看你。' : '灯熄了，TA 趴下休息。');
+    if (announce) showHomeReaction($('#homeLamp'), on ? '亮起来啦，我还想再陪你一会儿。' : '晚安，我就在这里。');
     save();
   }
   function openLetter() {
@@ -776,13 +789,19 @@
     S.journey.stage = 'COMPLETE';
     setDetail(1);
     setHomeLights(S.story.homeLightsOn !== false, false);
+    if (!S.journey.customRevealShown) {
+      S.journey.customRevealShown = true;
+      setTimeout(function () {
+        if (S.scene === 'home') showHomeReaction($('#homePet'), '我想起来啦。原来，这就是我。');
+      }, 650);
+    }
   }
 
   $('#homeLamp').addEventListener('click', function () { setHomeLights(!S.story.homeLightsOn, true); });
   $('#homeMailbox').addEventListener('click', openLetter);
   $('#homeBowl').addEventListener('click', function () {
     if (!S.story.homeLightsOn) setHomeLights(true, false);
-    showHomeNote('TA 走到饭盆旁边，摇了摇尾巴。');
+    showHomeReaction(this, '你是不是又怕我饿着呀？');
   });
   $('#homePet').addEventListener('click', function () {
     goto('companion');
@@ -1026,11 +1045,11 @@
      6. 启动
      ──────────────────────────────────────────────────────────────────── */
   var SCENE_INIT = {
-    intro: initIntro, journey: initJourney,
+    splash: initSplash, journey: initJourney,
     weave: initWeave, home: initHome, letter: initLetter, companion: initCompanion
   };
 
-  var jump = { '1': 'intro', '2': 'journey', '3': 'home', '4': 'companion' };
+  var jump = { '1': 'journey', '2': 'journey', '3': 'home', '4': 'companion' };
   document.addEventListener('keydown', function (e) {
     if (e.target && e.target.matches && e.target.matches('input, textarea')) return;
     if (jump[e.key]) goto(jump[e.key]);
@@ -1039,7 +1058,42 @@
 
   window.__mh = { S: S, goto: goto, reset: reset, addMemory: addMemory, addPaw: addPaw };  // 调试用
 
-  var resumed = load();
+  var resumed = REVIEW_MODE ? false : load();
+  if (window.PUPPYLAND_FULL_DEMO) {
+    S.scene = 'journey';
+    S.journey.stage = 'PET_CREATION';
+    S.journey.sceneIndex = 0;
+    S.journey.currentMemoryIndex = 0;
+    S.journey.worldLevel = 0;
+    S.journey.petCompletion = .25;
+    S.journey.customRevealShown = false;
+    S.detail = 0;
+  }
   setDetail(S.detail);
-  goto(resumed && (S.scene === 'home' || S.scene === 'letter' || S.scene === 'companion') ? S.scene : 'intro');
+  var reviewParams = new URLSearchParams(location.search);
+  var reviewScene = reviewParams.get('reviewScene');
+  var reviewState = reviewParams.get('reviewState');
+  if (reviewScene && scenes[reviewScene]) {
+    document.documentElement.classList.add('review-frame');
+    S.petName = S.petName || '煤球';
+    if (reviewScene === 'splash') scenes.splash.dataset.ready = '1';
+    if (reviewScene === 'journey') {
+      S.journey.stage = reviewState === 'confirm' ? 'PHOTO_INPUT' : 'PET_CREATION';
+      S.journey.sceneIndex = 0;
+      S.journey.currentMemoryIndex = 0;
+      S.journey.worldLevel = 0;
+      S.journey.petCompletion = reviewState === 'confirm' ? .35 : .25;
+      S.journey.petImage = S.journey.petImage || POSE.idle;
+      setDetail(reviewState === 'confirm' ? .35 : .25);
+    }
+    if (reviewScene === 'weave') {
+      scenes.weave.dataset.ready = '1';
+      scenes.weave.classList.add('is-settled', 'is-chosen');
+      $('#nWeave').textContent = '这一间，会是 ' + S.petName + ' 的家。';
+    }
+    goto(reviewScene);
+    return;
+  }
+  startupDestination = !window.PUPPYLAND_FULL_DEMO && resumed && (S.scene === 'home' || S.scene === 'letter' || S.scene === 'companion') ? S.scene : 'journey';
+  goto('splash');
 })();
