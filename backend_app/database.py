@@ -61,6 +61,8 @@ def init_db():
                 media_url TEXT,
                 trigger_npc INTEGER DEFAULT 0,
                 collar_evolution INTEGER DEFAULT 0,
+                provenance TEXT DEFAULT 'user_reported',
+                confidence REAL DEFAULT 1.0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (pet_id) REFERENCES pets(id) ON DELETE CASCADE
             )
@@ -228,6 +230,68 @@ def init_db():
                 generated_item_type TEXT,         -- 生成的物品类型
                 ai_response TEXT,                 -- AI的回应/引导
                 is_processed INTEGER DEFAULT 0,   -- 是否已处理
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (pet_id) REFERENCES pets(id) ON DELETE CASCADE
+            )
+        """)
+
+        conn.commit()
+
+        # Relationship Materials 表 - 存储从口述中提取的关系素材
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS relationship_materials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pet_id INTEGER NOT NULL,
+                material_type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                source_narration_id INTEGER,
+                provenance TEXT DEFAULT 'user_reported',
+                confidence REAL DEFAULT 1.0,
+                is_active INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (pet_id) REFERENCES pets(id) ON DELETE CASCADE,
+                FOREIGN KEY (source_narration_id) REFERENCES narration_records(id) ON DELETE SET NULL
+            )
+        """)
+
+        # Inferred Traits 表 - 存储从行为中推断的性格倾向
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS inferred_traits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pet_id INTEGER NOT NULL,
+                trait TEXT NOT NULL,
+                trait_category TEXT,
+                source_memory_id INTEGER,
+                confidence REAL DEFAULT 0.5,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (pet_id) REFERENCES pets(id) ON DELETE CASCADE,
+                FOREIGN KEY (source_memory_id) REFERENCES memories(id) ON DELETE SET NULL
+            )
+        """)
+
+        # Puppyland Shared 表 - 存储在Puppyland对话中共同创造的内容
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS puppyland_shared (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pet_id INTEGER NOT NULL,
+                shared_type TEXT NOT NULL,
+                content TEXT NOT NULL,
+                context TEXT,
+                usage_count INTEGER DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (pet_id) REFERENCES pets(id) ON DELETE CASCADE
+            )
+        """)
+
+        # Daily Letters 表 - 每日信件
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS daily_letters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pet_id INTEGER NOT NULL,
+                letter_date TEXT NOT NULL,
+                content TEXT,
+                is_generated INTEGER DEFAULT 0,
+                based_on_chat_count INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (pet_id) REFERENCES pets(id) ON DELETE CASCADE
             )

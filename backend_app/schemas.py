@@ -375,3 +375,86 @@ class NarrationProcessResponse(BaseModel):
     created_memory: Optional[MemoryResponse] = None
     created_item: Optional[VirtualHomeItemResponse] = None
     ai_suggestion: str
+
+# Relationship Material schemas - 关系素材
+class RelationshipMaterialBase(BaseModel):
+    material_type: str  # fixed_action | owner_phrase | habit | personality_trait
+    content: str
+    provenance: Optional[str] = 'user_reported'
+    confidence: Optional[float] = 1.0
+    is_active: Optional[bool] = True
+
+class RelationshipMaterialCreate(RelationshipMaterialBase):
+    pet_id: Optional[int] = None
+    source_narration_id: Optional[int] = None
+
+class RelationshipMaterialResponse(RelationshipMaterialBase):
+    id: int
+    pet_id: int
+    source_narration_id: Optional[int]
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+# Inferred Trait schemas - 推断的性格特征
+class InferredTraitBase(BaseModel):
+    trait: str
+    trait_category: Optional[str] = None  # personality | habit | preference
+    confidence: Optional[float] = 0.5
+
+class InferredTraitCreate(InferredTraitBase):
+    pet_id: Optional[int] = None
+    source_memory_id: Optional[int] = None
+
+class InferredTraitResponse(InferredTraitBase):
+    id: int
+    pet_id: int
+    source_memory_id: Optional[int]
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+# Puppyland Shared schemas - 共同创造的内容
+class PuppylandSharedBase(BaseModel):
+    shared_type: str  # nickname | game | inside_joke | new_concept
+    content: str
+    context: Optional[str] = None
+    usage_count: Optional[int] = 1
+
+class PuppylandSharedCreate(PuppylandSharedBase):
+    pet_id: Optional[int] = None
+
+class PuppylandSharedResponse(PuppylandSharedBase):
+    id: int
+    pet_id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+# Daily Letter schemas - 每日信件
+class DailyLetterBase(BaseModel):
+    letter_date: str
+    content: Optional[str] = None
+    is_generated: Optional[bool] = False
+    based_on_chat_count: Optional[int] = 0
+
+class DailyLetterCreate(BaseModel):
+    pet_id: int
+    letter_date: str
+    content: Optional[str] = None
+    is_generated: Optional[bool] = False
+    based_on_chat_count: Optional[int] = 0
+
+class DailyLetterResponse(DailyLetterBase):
+    id: int
+    pet_id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class GenerateLetterRequest(BaseModel):
+    letter_date: Optional[str] = None  # 不传则默认今天
