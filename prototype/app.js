@@ -146,6 +146,15 @@
     } catch (e) { return null; }
   }
 
+  // 根据AI生成状态刷新首页背景图：生成中有狗图时显示home-v2.png（避免页面空荡荡），
+  // 生成完成后或未开始时显示home-v3.png（无狗，AI生成的狗会叠在homePet上）。
+  function refreshHomeArt() {
+    var homeArtEl = $('.home-art');
+    if (!homeArtEl) return;
+    var inProgress = S.generatingDogImage && !S.generatedDogImage;
+    homeArtEl.style.backgroundImage = 'url("assets/' + (inProgress ? 'home-v2.png' : 'home-v3.png') + '")';
+  }
+
   // 触发AI生成狗狗形象图片
   async function triggerDogImageGeneration() {
     // 清除上一次abort后设置的retry timer，避免与新请求竞争
@@ -214,6 +223,7 @@
         S.generatingDogImage = false;
         save();
         console.log('[triggerDogImageGeneration] 狗狗图片已生成并保存，长度:', result.image_base64.length);
+        refreshHomeArt();
         // 图片生成后如果当前在home场景，立即显示
         if (S.scene === 'home') {
           var homePetEl = $('#homePet');
@@ -231,6 +241,7 @@
       } else if (result) {
         S.generatingDogImage = false;
         save();
+        refreshHomeArt();
         console.warn('[triggerDogImageGeneration] 生成失败:', result.message, 'breeds:', result.breed_names);
         // 如果服务端返回可重试标志，等待后重试
         if (result.retryable) {
@@ -244,6 +255,7 @@
       S.dogGenController = null;
       S.generatingDogImage = false;
       save();
+      refreshHomeArt();
       // 网络中断或页面跳转导致，重试一次
       if (e.message && e.message.includes('aborted')) {
         console.log('[triggerDogImageGeneration] 请求被中断，2秒后重试...');
@@ -974,8 +986,9 @@
           return;
         }
         if (S.journey.sceneIndex === 0) {
-          // 跳过「游泳」画面，直接进入下一个场景（彩虹桥）
-          journeyRainbow(); return;
+          S.journey.sceneIndex = 1; S.journey.worldLevel = 2;
+          $('#journeyKicker').textContent = '记忆旅程'; $('#journeyTitle').textContent = '一些画面开始浮现。'; $('#journeyCopy').textContent = '再往前一点，彩虹桥就在前面。';
+          journeyWorldLevel(); journeyProgress(); save(); return;
         }
         if (S.journey.sceneIndex === 1) {
           S.journey.sceneIndex = 2; S.journey.stage = 'RAINBOW_BRIDGE'; S.journey.worldLevel = 5; setDetail(1);
@@ -1403,6 +1416,7 @@
         homePetEl.appendChild(img);
       }
     }
+    refreshHomeArt();
   }
 
   $('#homeLamp').addEventListener('click', function () { setHomeLights(!S.story.homeLightsOn, true); });
@@ -1414,25 +1428,28 @@
   $('#homePet').addEventListener('click', function () {
     goto('companion');
   });
-  // 每次进入home场景时尝试显示AI生成的狗狗图片
+  // 每次进入home场景时尝试显示AI生成的狗狗图片，并刷新背景图
   (function () {
     var origGoto = goto;
     window.goto = function (name) {
       origGoto(name);
-      if (name === 'home' && S.generatedDogImage) {
-        setTimeout(function () {
-          var homePetEl = $('#homePet');
-          if (homePetEl) {
-            var existingImg = homePetEl.querySelector('.generated-dog-img');
-            if (existingImg) existingImg.remove();
-            var img = document.createElement('img');
-            img.className = 'generated-dog-img';
-            img.src = 'data:image/png;base64,' + S.generatedDogImage;
-            img.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain;pointer-events:none;';
-            homePetEl.style.position = 'relative';
-            homePetEl.appendChild(img);
-          }
-        }, 100);
+      if (name === 'home') {
+        refreshHomeArt();
+        if (S.generatedDogImage) {
+          setTimeout(function () {
+            var homePetEl = $('#homePet');
+            if (homePetEl) {
+              var existingImg = homePetEl.querySelector('.generated-dog-img');
+              if (existingImg) existingImg.remove();
+              var img = document.createElement('img');
+              img.className = 'generated-dog-img';
+              img.src = 'data:image/png;base64,' + S.generatedDogImage;
+              img.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain;pointer-events:none;';
+              homePetEl.style.position = 'relative';
+              homePetEl.appendChild(img);
+            }
+          }, 100);
+        }
       }
     };
   })();
@@ -1708,6 +1725,7 @@
   if (!REVIEW_MODE && S.generatingDogImage && !S.generatedDogImage) {
     S.generatingDogImage = false;
     save();
+    refreshHomeArt();
     console.log('[triggerDogImageGeneration] 页面恢复检测到中断的生成请求，2秒后重试...');
     setTimeout(function () { triggerDogImageGeneration(); }, 2000);
   }
