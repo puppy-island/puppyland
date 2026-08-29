@@ -31,3 +31,4 @@ build/
 
 # 上传文件
 backend_app/uploads/
+.env
