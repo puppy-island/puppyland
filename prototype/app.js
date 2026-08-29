@@ -1192,7 +1192,6 @@
         }
 
         function doStop(event) {
-          clearTimeout(autoEndTimer); autoEndTimer = null;
           if (ended) { releaseMic(); return; }
           ended = true;
           stopPauseMonitor();
