@@ -514,6 +514,40 @@
       .catch(function () { return { extracted_name: null, breed: null, color: null, personality_traits: [], key_objects: [], habits: [] }; });
   }
 
+  /* 检查品种图片是否存在于 assets/breeds/ 目录 */
+  function breedImageExists(breedName) {
+    var testImg = new Image();
+    testImg.src = 'assets/breeds/' + encodeURIComponent(breedName) + '.png';
+    return testImg.complete && testImg.naturalWidth > 0;
+  }
+
+  /* 将本地图片文件转为 base64（用于直接使用 assets/breeds/ 中的图片） */
+  function localImageToBase64(src) {
+    return new Promise(function (res, rej) {
+      var img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = function () {
+        var canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        var ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        var b64 = canvas.toDataURL('image/png').replace(/^data:image\/\w+;base64,/, '');
+        res(b64);
+      };
+      img.onerror = rej;
+      img.src = src;
+    });
+  }
+
+  /* 判断描述中是否有特殊个性化特征（颜色/性格/物品/习惯），有则返回 false */
+  function hasNoSpecialFeatures(info) {
+    return !info.color
+      && (!info.personality_traits || info.personality_traits.length === 0)
+      && (!info.key_objects || info.key_objects.length === 0)
+      && (!info.habits || info.habits.length === 0);
+  }
+
   /* ────────────────────────────────────────────────────────────────────
      3. 通用组件：旁白、爪印轨迹、录音采集
      ──────────────────────────────────────────────────────────────────── */
@@ -952,8 +986,8 @@
     $('#journeyCopy').textContent = '一个模糊的轮廓正在出现，真正的样子还在慢慢生成。';
     journeyProgress(); journeyWorldLevel(); save();
     clearTimeout(journeyTimer);
-    // 触发AI生成狗狗形象（异步，不阻塞主流程），已有请求在进行中则跳过
-    if (!S.generatingDogImage) {
+    // 触发AI生成狗狗形象（异步，不阻塞主流程），已有请求在进行中或已有本地图片则跳过
+    if (!S.generatingDogImage && !S.generatedDogImage) {
       triggerDogImageGeneration();
     }
   }
@@ -1208,6 +1242,30 @@
           S.journey.generationStartedAt = Date.now();
           interpret(text);
           ensureBackendPet();
+
+          // ── 优化：品种图片已存在且无特殊特征时，直接使用本地图片，跳过 AI 生成 ──
+          if (info.breed && hasNoSpecialFeatures(info)) {
+            localImageToBase64('assets/breeds/' + encodeURIComponent(info.breed) + '.png').then(function (b64) {
+              S.generatedDogImage = b64;
+              S.generatingDogImage = false;
+              save();
+              refreshHomeArt();
+              if (S.scene === 'home') {
+                var homePetEl = $('#homePet');
+                if (homePetEl) {
+                  var existingImg = homePetEl.querySelector('.generated-dog-img');
+                  if (existingImg) existingImg.remove();
+                  var img = document.createElement('img');
+                  img.className = 'generated-dog-img';
+                  img.src = 'data:image/png;base64,' + S.generatedDogImage;
+                  img.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain;pointer-events:none;';
+                  homePetEl.style.position = 'relative';
+                  homePetEl.appendChild(img);
+                }
+              }
+            }).catch(function () {});
+          }
+
           S.journey.stage = 'PHOTO_INPUT'; setDetail(0);
           journeyWorld.classList.remove('is-running');
           journeyCardReset(); journeyConfirm.hidden = false;
