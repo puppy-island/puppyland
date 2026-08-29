@@ -3,7 +3,9 @@ import os
 from contextlib import contextmanager
 from datetime import datetime
 
-DATABASE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "pet_memorial.db")
+_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+os.makedirs(_DATA_DIR, exist_ok=True)
+DATABASE_PATH = os.path.join(_DATA_DIR, "pet_memorial.db")
 
 def get_db_connection():
     """Get database connection with row factory"""

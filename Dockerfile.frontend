@@ -2,6 +2,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# 避免容器默认 C/POSIX locale 引发的编码问题
+ENV LANG=C.UTF-8 \
+    PYTHONIOENCODING=utf-8
+
 COPY prototype/ ./prototype/
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
