@@ -2144,7 +2144,7 @@ def get_asr_url(voice_id: str = Query(default="", description="语音ID")):
 def extract_pet_info(text: str = Query(..., description="用户口述的原始文本")):
     """
     从用户口述文本中提取宠物信息（名字、品种、性格等）。
-    先用正则提取名字，再用 LLM 提取其他信息。
+    优先使用 LLM 提取名字及其他信息；LLM 未返回有效名字时，再回退到规则提取。
 
     设计：支持增量更新——如果 pet_name 已存在，只在未提取到时才覆盖。
     """
@@ -2166,17 +2166,18 @@ def extract_pet_info(text: str = Query(..., description="用户口述的原始�
         r'(?:小狗|狗|TA|它)(?:叫|名字是) ?([A-Za-z一-鿿]{1,8})',
     ]
 
-    extracted_name = None
+    fallback_name = None
     for pat in NAME_PATTERNS:
         m = re.search(pat, text)
         if m:
             candidate = m.group(1).strip()
             # 过滤掉明显不是名字的词
             if candidate and len(candidate) >= 2 and candidate not in ('一只', '这只', '的小狗', '一只狗', '什么', '名字'):
-                extracted_name = candidate
+                fallback_name = candidate
                 break
 
-    # ── Step 2: LLM 提取更多信息 ──────────────────────────────────
+    # ── Step 2: LLM 优先提取名字及其他信息 ─────────────────────────
+    extracted_name = None
     breed = None
     color = None
     personality_traits = []
@@ -2198,6 +2199,7 @@ def extract_pet_info(text: str = Query(..., description="用户口述的原始�
 
 请以JSON格式返回：
 {{
+    "name": "宠物名字；只有文本明确提到名字时填写，否则为 null",
     "breed": "狗的品种，如柯基/金毛/泰迪/中华田园犬/拉布拉多/哈士奇/柴犬/法斗/吉娃娃/马尔济斯/边牧，或 null（未提及）",
     "color": "主要毛色，如白色/黄色/黑色/棕色/灰色/奶油色/花色，或 null",
     "personality_traits": ["性格关键词列表，如胆小/黏人/贪吃/活泼/安静/爱叫/聪明/调皮/忠诚/倔强，最多3个"],
@@ -2214,6 +2216,11 @@ def extract_pet_info(text: str = Query(..., description="用户口述的原始�
 
         result_text = response.choices[0].message.content
         result = parse_llm_json_response(result_text)
+        candidate_name = result.get("name") or result.get("pet_name") or result.get("extracted_name")
+        if isinstance(candidate_name, str):
+            candidate_name = candidate_name.strip()
+            if candidate_name and len(candidate_name) <= 20 and candidate_name not in ('一只', '这只', '的小狗', '一只狗', '什么', '名字', 'null'):
+                extracted_name = candidate_name
         breed = result.get("breed")
         color = result.get("color")
         personality_traits = result.get("personality_traits") or []
@@ -2223,7 +2230,11 @@ def extract_pet_info(text: str = Query(..., description="用户口述的原始�
         owner_phrases = result.get("owner_phrases") or []
 
     except Exception as e:
-        pass  # 网络错误时降级，只返回正则提取的名字
+        pass  # 网络错误时降级到规则提取名字
+
+    # 仅当 LLM 没有给出有效名字时使用规则结果。
+    if not extracted_name:
+        extracted_name = fallback_name
 
     return {
         "extracted_name": extracted_name,
@@ -2697,4 +2708,3 @@ def get_letter_history(pet_id: int, limit: int = Query(7, ge=1, le=30)):
             ORDER BY letter_date DESC LIMIT ?
         """, (pet_id, limit))
         return [dict_from_row(row) for row in cursor.fetchall()]
-

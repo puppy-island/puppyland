@@ -60,22 +60,23 @@
         <p class="journey-kicker" id="journeyKicker">召回 TA</p>
         <h2 class="journey-title" id="journeyTitle">我好像……记不清自己原来的样子了</h2>
         <p class="journey-copy" id="journeyCopy">你可以帮我想起来吗？</p>
+        <div class="journey-voice-example" id="journeyVoiceExample" hidden aria-live="polite"></div>
         <div class="journey-creator" id="journeyCreator">
           <button class="journey-voice" id="journeyVoice" type="button" aria-label="按住爪子，说说你记忆里的 TA 吧">
             <svg viewBox="0 0 26 26"><use href="#paw"></use></svg>
           </button>
           <span class="journey-voice-label" id="journeyVoiceLabel">按住爪子，说说你记忆里的 TA 吧</span>
+          <div class="journey-voice-hint" id="journeyVoiceHint" hidden><span class="journey-voice-quote" id="journeyVoiceQuote"></span></div>
         </div>
         <div class="journey-confirm" id="journeyConfirm" hidden>
           <div class="journey-confirm-tools">
-            <p>照片会帮助我更快找回自己的样子。</p>
             <label class="journey-add-photo" aria-label="补充照片，让小狗更像记忆里的样子">
               <input id="journeyRegeneratePhoto" type="file" accept="image/*">
               <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#camera"></use></svg>
               <span>补充照片</span>
             </label>
           </div>
-          <button class="ghost-btn journey-confirm-btn" id="journeyConfirmBtn" type="button">暂时跳过</button>
+          <button class="ghost-btn journey-confirm-btn" id="journeyConfirmBtn" type="button">跳过</button>
         </div>
       </div>
     </section>
@@ -151,6 +152,7 @@
     <div class="rec-overlay" id="recOverlay" hidden>
       <div class="rec-card">
         <div class="wave" id="wave" aria-hidden="true"></div>
+        <p class="rec-pause" id="recPause" aria-live="polite"></p>
         <p class="rec-tip" id="recTip">松开结束</p>
       </div>
     </div>
