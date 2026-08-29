@@ -17,7 +17,8 @@ from backend_app.schemas import (
     JourneyRecordResponse, JourneyRecordCreate,
     NarrationRecordResponse, NarrationRecordCreate,
     RelationshipMaterialResponse, InferredTraitResponse, PuppylandSharedResponse,
-    DailyLetterResponse, GenerateLetterRequest
+    DailyLetterResponse, GenerateLetterRequest,
+    GenerateDogImageRequest
 )
 
 router = APIRouter()
@@ -427,20 +428,21 @@ def generate_home_item(pet_id: int, memory_id: int):
 
         # 尝试使用AI生成更具体的物品名称和描述
         try:
-            from openai import OpenAI
             from dotenv import load_dotenv
             load_dotenv(override=True)
 
-            client = OpenAI(
-                api_key=os.getenv("api_key"),
-                base_url=os.getenv("base_url")
-            )
-
-            response = client.chat.completions.create(
-                model=os.getenv("model", "Qwen/Qwen3.6-27B"),
-                messages=[{
-                    "role": "user",
-                    "content": f"""根据以下宠物记忆，生成一个适合放在虚拟家园中的物品名称和描述。
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    os.getenv("base_url") + "/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {os.getenv('api_key')}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": os.getenv("model", "Qwen/Qwen3.6-27B"),
+                        "messages": [{
+                            "role": "user",
+                            "content": f"""根据以下宠物记忆，生成一个适合放在虚拟家园中的物品名称和描述。
 
 宠物名字：{pet.get('name', 'ta')}
 记忆类型：{memory_type}
@@ -454,11 +456,14 @@ def generate_home_item(pet_id: int, memory_id: int):
 }}
 
 只返回JSON，不要其他内容。"""
-                }],
-                temperature=0.3
-            )
+                        }],
+                        "temperature": 0.3
+                    }
+                )
+                response.raise_for_status()
+                result = response.json()
+                result_text = result["choices"][0]["message"]["content"]
 
-            result_text = response.choices[0].message.content
             result = parse_llm_json_response(result_text)
             suggested_item = {
                 "item_type": result.get("item_type", item_type),
@@ -566,7 +571,6 @@ async def identify_dog(
     2. file: 直接上传图片文件
     """
     try:
-        from openai import OpenAI
         from dotenv import load_dotenv
         import base64
 
@@ -586,11 +590,6 @@ async def identify_dog(
                 message="请提供 image_url 或上传 file"
             )
 
-        client = OpenAI(
-            api_key=os.getenv("api_key"),
-            base_url=os.getenv("base_url")
-        )
-
         # 构建图片内容
         if file:
             # base64 上传
@@ -599,19 +598,26 @@ async def identify_dog(
             # URL 方式
             image_data = image_url
 
-        response = client.chat.completions.create(
-            model=os.getenv("model", "Qwen/Qwen3.6-27B"),
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(
+                os.getenv("base_url") + "/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {os.getenv('api_key')}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": os.getenv("model", "Qwen/Qwen3.6-27B"),
+                    "messages": [
                         {
-                            "type": "image_url",
-                            "image_url": {"url": image_data}
-                        },
-                        {
-                            "type": "text",
-                            "text": """请仔细分析这张图片中的狗狗，用JSON格式返回以下信息：
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": image_data}
+                                },
+                                {
+                                    "type": "text",
+                                    "text": """请仔细分析这张图片中的狗狗，用JSON格式返回以下信息：
 {
     "breed": "狗的品种",
     "breed_confidence": 0.95,  // 置信度 0-1
@@ -620,14 +626,17 @@ async def identify_dog(
     "description": "简单描述一下这只狗的特征"
 }
 如果没有看到狗，返回 success: false。"""
+                                }
+                            ]
                         }
-                    ]
+                    ],
+                    "temperature": 0.1
                 }
-            ],
-            temperature=0.1
-        )
+            )
+            response.raise_for_status()
+            result = response.json()
+            result_text = result["choices"][0]["message"]["content"]
 
-        result_text = response.choices[0].message.content
         # 尝试解析JSON
         try:
             result = parse_llm_json_response(result_text)
@@ -790,11 +799,11 @@ def send_message_to_pet(pet_id: int, chat_request: ChatRequest):
         emotional_profile = dict_from_row(profile_row) if profile_row else None
 
         # 构建角色设定（CharacterProfile）
-        pet_name = pet.get('name', 'TA')
-        breed = pet.get('breed', '不明')
-        personality = pet.get('personality', '温柔忠诚')
-        likes = pet.get('likes', '陪伴主人')
-        fears = pet.get('fears', '离开主人')
+        pet_name = pet.get('name') or 'TA'
+        breed = pet.get('breed') or '不明'
+        personality = pet.get('personality') or '温柔忠诚'
+        likes = pet.get('likes') or '陪伴主人'
+        fears = pet.get('fears') or '离开主人'
 
         # 查询关系素材（从数据库获取）
         cursor.execute("""
@@ -955,23 +964,26 @@ def send_message_to_pet(pet_id: int, chat_request: ChatRequest):
 
         # 调用AI生成回复
         try:
-            from openai import OpenAI
             from dotenv import load_dotenv
             load_dotenv(override=True)
 
-            client = OpenAI(
-                api_key=os.getenv("api_key"),
-                base_url=os.getenv("base_url")
-            )
-
-            response = client.chat.completions.create(
-                model=os.getenv("model", "Qwen/Qwen3.6-27B"),
-                messages=messages,
-                temperature=0.7,
-                max_tokens=150
-            )
-
-            pet_reply = response.choices[0].message.content
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    os.getenv("base_url") + "/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {os.getenv('api_key')}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": os.getenv("model", "Qwen/Qwen3.6-27B"),
+                        "messages": messages,
+                        "temperature": 0.7,
+                        "max_tokens": 150
+                    }
+                )
+                response.raise_for_status()
+                result = response.json()
+                pet_reply = result["choices"][0]["message"]["content"]
 
             # 清理回复：移除多余的空行和冗余格式
             pet_reply = pet_reply.strip()
@@ -1073,11 +1085,11 @@ def generate_beat(pet_id: int, request: GenerateBeatRequest = None):
         SENSITIVE = ['走了', '离开', '去世', '最后', '生病', '治疗', '安乐', '遗憾', '对不起', '后悔', '骨灰', '天堂', '彩虹桥']
         safe_memories = [m for m in raw_memories if not any(p in m.get('content', '') for p in SENSITIVE)]
 
-        pet_name = pet.get('name', 'TA')
-        breed = pet.get('breed', '不明')
-        personality = pet.get('personality', '温柔忠诚')
-        likes = pet.get('likes', '陪伴主人')
-        fears = pet.get('fears', '离开主人')
+        pet_name = pet.get('name') or 'TA'
+        breed = pet.get('breed') or '不明'
+        personality = pet.get('personality') or '温柔忠诚'
+        likes = pet.get('likes') or '陪伴主人'
+        fears = pet.get('fears') or '离开主人'
 
         # 查询关系素材
         cursor.execute("""
@@ -1172,25 +1184,29 @@ def generate_beat(pet_id: int, request: GenerateBeatRequest = None):
 - 如果 prev_env 有阳光元素，env 也要是白天氛围"""
 
         try:
-            from openai import OpenAI
             from dotenv import load_dotenv
             load_dotenv(override=True)
 
-            client = OpenAI(
-                api_key=os.getenv("api_key"),
-                base_url=os.getenv("base_url")
+            import httpx
+            client = httpx.Client(timeout=30.0)
+            response = client.post(
+                os.getenv("base_url") + "/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {os.getenv('api_key')}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": os.getenv("model", "deepseek-v4-flash"),
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.8,
+                    "max_tokens": 200
+                }
             )
-
-            response = client.chat.completions.create(
-                model=os.getenv("model", "deepseek-v4-flash"),
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.8,
-                max_tokens=200
-            )
+            response.raise_for_status()
+            result = response.json()
+            raw = result["choices"][0]["message"]["content"].strip()
 
             import json, re
-            raw = response.choices[0].message.content.strip()
-
             match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
             if match:
                 json_str = match.group(1)
@@ -1706,19 +1722,23 @@ def generate_journey(pet_id: int):
 
         # 生成旅程
         try:
-            from openai import OpenAI
             from dotenv import load_dotenv
             load_dotenv(override=True)
 
-            client = OpenAI(api_key=os.getenv("api_key"), base_url=os.getenv("base_url"))
-
             memories_text = "\n".join([f"- {m['memory_type']}: {m['content'][:100]}" for m in memories]) if memories else "暂无记忆"
 
-            response = client.chat.completions.create(
-                model=os.getenv("model", "Qwen/Qwen3.6-27B"),
-                messages=[{
-                    "role": "user",
-                    "content": f"""基于以下宠物信息，生成一段情感旅程故事。
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    os.getenv("base_url") + "/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {os.getenv('api_key')}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": os.getenv("model", "Qwen/Qwen3.6-27B"),
+                        "messages": [{
+                            "role": "user",
+                            "content": f"""基于以下宠物信息，生成一段情感旅程故事。
 
 宠物名字：{pet.get('name', 'ta')}
 性格：{pet.get('personality', '未知')}
@@ -1735,11 +1755,14 @@ def generate_journey(pet_id: int):
 }}
 
 只返回JSON。"""
-                }],
-                temperature=0.7
-            )
+                        }],
+                        "temperature": 0.7
+                    }
+                )
+                response.raise_for_status()
+                result = response.json()
+                result_text = result["choices"][0]["message"]["content"]
 
-            result_text = response.choices[0].message.content
             result = parse_llm_json_response(result_text)
             based_on_memory_id = memories[0]["id"] if memories else None
             cursor.execute("""
@@ -1780,17 +1803,21 @@ def process_narration(pet_id: int, narration: NarrationRecordCreate):
         raw_text = narration.raw_text
 
         try:
-            from openai import OpenAI
             from dotenv import load_dotenv
             load_dotenv(override=True)
 
-            client = OpenAI(api_key=os.getenv("api_key"), base_url=os.getenv("base_url"))
-
-            response = client.chat.completions.create(
-                model=os.getenv("model", "Qwen/Qwen3.6-27B"),
-                messages=[{
-                    "role": "user",
-                    "content": f"""分析用户关于宠物"{pet.get('name', 'ta')}"的描述，提取信息并生成记忆和物品。
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    os.getenv("base_url") + "/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {os.getenv('api_key')}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": os.getenv("model", "Qwen/Qwen3.6-27B"),
+                        "messages": [{
+                            "role": "user",
+                            "content": f"""分析用户关于宠物"{pet.get('name', 'ta')}"的描述，提取信息并生成记忆和物品。
 
 用户描述：{raw_text}
 
@@ -1812,13 +1839,16 @@ def process_narration(pet_id: int, narration: NarrationRecordCreate):
 }}
 
 只返回JSON。"""
-                }],
-                temperature=0.3
-            )
+                        }],
+                        "temperature": 0.3
+                    }
+                )
+                response.raise_for_status()
+                result = response.json()
+                result_text = result["choices"][0]["message"]["content"]
 
             import json
             import re
-            result_text = response.choices[0].message.content
             # 尝试直接解析，如果失败则尝试提取JSON块
             try:
                 result = json.loads(result_text)
@@ -1919,17 +1949,21 @@ def auto_grow_from_narration(pet_id: int, narration_text: str = Query(..., descr
 
         # 解析口述
         try:
-            from openai import OpenAI
             from dotenv import load_dotenv
             load_dotenv(override=True)
 
-            client = OpenAI(api_key=os.getenv("api_key"), base_url=os.getenv("base_url"))
-
-            response = client.chat.completions.create(
-                model=os.getenv("model", "Qwen/Qwen3.6-27B"),
-                messages=[{
-                    "role": "user",
-                    "content": f"""分析用户关于宠物"{pet.get('name', 'ta')}"的描述，提取信息并生成记忆和物品。
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    os.getenv("base_url") + "/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {os.getenv('api_key')}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": os.getenv("model", "Qwen/Qwen3.6-27B"),
+                        "messages": [{
+                            "role": "user",
+                            "content": f"""分析用户关于宠物"{pet.get('name', 'ta')}"的描述，提取信息并生成记忆和物品。
 
 用户描述：{narration_text}
 
@@ -1951,13 +1985,16 @@ def auto_grow_from_narration(pet_id: int, narration_text: str = Query(..., descr
 }}
 
 只返回JSON。"""
-                }],
-                temperature=0.3
-            )
+                        }],
+                        "temperature": 0.3
+                    }
+                )
+                response.raise_for_status()
+                result = response.json()
+                result_text = result["choices"][0]["message"]["content"]
 
             import json
             import re
-            result_text = response.choices[0].message.content
             # 尝试直接解析，如果失败则尝试提取JSON块
             try:
                 result = json.loads(result_text)
@@ -2149,7 +2186,6 @@ def extract_pet_info(text: str = Query(..., description="用户口述的原始�
     设计：支持增量更新——如果 pet_name 已存在，只在未提取到时才覆盖。
     """
     import re, os
-    from openai import OpenAI
     from dotenv import load_dotenv
     load_dotenv(override=True)
 
@@ -2185,15 +2221,18 @@ def extract_pet_info(text: str = Query(..., description="用户口述的原始�
     habits = []
 
     try:
-        client = OpenAI(
-            api_key=os.getenv("api_key"),
-            base_url=os.getenv("base_url")
-        )
-        response = client.chat.completions.create(
-            model=os.getenv("model", "Qwen/Qwen3.6-27B"),
-            messages=[{
-                "role": "user",
-                "content": f"""分析以下关于宠物（很可能是狗狗）的描述文本，提取信息。
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(
+                os.getenv("base_url") + "/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {os.getenv('api_key')}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": os.getenv("model", "Qwen/Qwen3.6-27B"),
+                    "messages": [{
+                        "role": "user",
+                        "content": f"""分析以下关于宠物（很可能是狗狗）的描述文本，提取信息。
 
 描述：{text}
 
@@ -2210,11 +2249,14 @@ def extract_pet_info(text: str = Query(..., description="用户口述的原始�
 }}
 
 只返回JSON。"""
-            }],
-            temperature=0.2
-        )
+                    }],
+                    "temperature": 0.2
+                }
+            )
+            response.raise_for_status()
+            result = response.json()
+            result_text = result["choices"][0]["message"]["content"]
 
-        result_text = response.choices[0].message.content
         result = parse_llm_json_response(result_text)
         candidate_name = result.get("name") or result.get("pet_name") or result.get("extracted_name")
         if isinstance(candidate_name, str):
@@ -2370,7 +2412,6 @@ def _generate_default_letter(pet_id: int, letter_date: str) -> dict:
     """生成默认信件内容"""
     import os
     from datetime import datetime
-    from openai import OpenAI
     from dotenv import load_dotenv
     load_dotenv(override=True)
 
@@ -2408,14 +2449,23 @@ def _generate_default_letter(pet_id: int, letter_date: str) -> dict:
 请直接返回信件内容，不要加引号或任何格式。"""
 
         try:
-            client = OpenAI(api_key=os.getenv("api_key"), base_url=os.getenv("base_url"))
-            response = client.chat.completions.create(
-                model=os.getenv("model", "deepseek-v4-pro"),
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.8,
-                max_tokens=200
-            )
-            content = response.choices[0].message.content.strip()
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    os.getenv("base_url") + "/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {os.getenv('api_key')}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": os.getenv("model", "deepseek-v4-pro"),
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": 0.8,
+                        "max_tokens": 200
+                    }
+                )
+                response.raise_for_status()
+                result = response.json()
+                content = result["choices"][0]["message"]["content"].strip()
         except Exception as e:
             content = f"我最爱的主人：今天也很好。记得我一直在。{pet_name}"
 
@@ -2435,7 +2485,6 @@ def _generate_letter_content(pet_name: str, traits: list, fixed_actions: list,
                               is_personalized: bool = False) -> str:
     """生成信件内容的辅助函数（不涉及数据库操作）"""
     import os
-    from openai import OpenAI
     from dotenv import load_dotenv
     load_dotenv(override=True)
 
@@ -2474,14 +2523,23 @@ def _generate_letter_content(pet_name: str, traits: list, fixed_actions: list,
 请直接返回信件内容，不要加引号或任何格式。"""
 
     try:
-        client = OpenAI(api_key=os.getenv("api_key"), base_url=os.getenv("base_url"))
-        response = client.chat.completions.create(
-            model=os.getenv("model", "deepseek-v4-pro"),
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.8,
-            max_tokens=300
-        )
-        return response.choices[0].message.content.strip()
+        with httpx.Client(timeout=30.0) as client:
+            response = client.post(
+                os.getenv("base_url") + "/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {os.getenv('api_key')}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": os.getenv("model", "deepseek-v4-pro"),
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.8,
+                    "max_tokens": 300
+                }
+            )
+            response.raise_for_status()
+            result = response.json()
+            return result["choices"][0]["message"]["content"].strip()
     except Exception as e:
         return f"我最爱的主人：今天也很好。记得我一直在。{pet_name}"
 
@@ -2489,7 +2547,6 @@ def _generate_letter_content(pet_name: str, traits: list, fixed_actions: list,
 def _generate_personalized_letter(pet_id: int, letter_date: str, current_chat_count: int) -> dict:
     """基于聊天增量重新生成个性化信件"""
     import os
-    from openai import OpenAI
     from dotenv import load_dotenv
     load_dotenv(override=True)
 
@@ -2548,14 +2605,23 @@ def _generate_personalized_letter(pet_id: int, letter_date: str, current_chat_co
 请直接返回信件内容，不要加引号或任何格式。"""
 
         try:
-            client = OpenAI(api_key=os.getenv("api_key"), base_url=os.getenv("base_url"))
-            response = client.chat.completions.create(
-                model=os.getenv("model", "deepseek-v4-pro"),
-                messages=[{"role": "user", "content": letters_prompt}],
-                temperature=0.8,
-                max_tokens=300
-            )
-            content = response.choices[0].message.content.strip()
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    os.getenv("base_url") + "/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {os.getenv('api_key')}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": os.getenv("model", "deepseek-v4-pro"),
+                        "messages": [{"role": "user", "content": letters_prompt}],
+                        "temperature": 0.8,
+                        "max_tokens": 300
+                    }
+                )
+                response.raise_for_status()
+                result = response.json()
+                content = result["choices"][0]["message"]["content"].strip()
         except Exception as e:
             content = f"我最爱的主人：今天也很好。记得我一直在。{pet_name}"
 
@@ -2579,7 +2645,6 @@ def generate_daily_letter(pet_id: int, request: GenerateLetterRequest = None):
     """
     import os
     from datetime import datetime
-    from openai import OpenAI
     from dotenv import load_dotenv
     load_dotenv(override=True)
 
@@ -2666,14 +2731,23 @@ def generate_daily_letter(pet_id: int, request: GenerateLetterRequest = None):
 请直接返回信件内容，不要加引号或任何格式。"""
 
         try:
-            client = OpenAI(api_key=os.getenv("api_key"), base_url=os.getenv("base_url"))
-            response = client.chat.completions.create(
-                model=os.getenv("model", "deepseek-v4-pro"),
-                messages=[{"role": "user", "content": letters_prompt}],
-                temperature=0.8,
-                max_tokens=300
-            )
-            content = response.choices[0].message.content.strip()
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(
+                    os.getenv("base_url") + "/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {os.getenv('api_key')}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": os.getenv("model", "deepseek-v4-pro"),
+                        "messages": [{"role": "user", "content": letters_prompt}],
+                        "temperature": 0.8,
+                        "max_tokens": 300
+                    }
+                )
+                response.raise_for_status()
+                result = response.json()
+                content = result["choices"][0]["message"]["content"].strip()
         except Exception as e:
             content = f"我最爱的主人：今天也很好。记得我一直在。{pet_name}"
 
@@ -2708,3 +2782,424 @@ def get_letter_history(pet_id: int, limit: int = Query(7, ge=1, le=30)):
             ORDER BY letter_date DESC LIMIT ?
         """, (pet_id, limit))
         return [dict_from_row(row) for row in cursor.fetchall()]
+
+# ============ Dog Image Generation ============
+
+import os
+import base64
+import re
+from PIL import Image
+import io
+from fastapi import UploadFile, File
+
+BREEDS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prototype", "assets", "breeds")
+THREEVIEWS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "prototype", "assets", "threeviews")
+
+
+def _extract_dominant_color(image_path: str) -> tuple:
+    """提取图片的主导颜色 (R, G, B)"""
+    try:
+        img = Image.open(image_path).convert("RGB")
+        img = img.resize((50, 50))
+        pixels = list(img.getdata())
+        # 简单的平均色
+        r = int(sum(p[0] for p in pixels) / len(pixels))
+        g = int(sum(p[1] for p in pixels) / len(pixels))
+        b = int(sum(p[2] for p in pixels) / len(pixels))
+        return (r, g, b)
+    except Exception:
+        return (128, 128, 128)
+
+
+def _color_distance(c1: tuple, c2: tuple) -> float:
+    """计算两个颜色的欧氏距离"""
+    return ((c1[0] - c2[0]) ** 2 + (c1[1] - c2[1]) ** 2 + (c1[2] - c2[2]) ** 2) ** 0.5
+
+
+def _text_similarity(name1: str, name2: str) -> float:
+    """计算两个字符串的文字相似度（简单的字符级Jaccard）"""
+    s1 = set(name1.lower())
+    s2 = set(name2.lower())
+    if not s1 or not s2:
+        return 0.0
+    intersection = len(s1 & s2)
+    union = len(s1 | s2)
+    return intersection / union if union > 0 else 0.0
+
+
+def _find_closest_breeds_by_color(user_image_base64: str) -> list:
+    """根据用户上传图片的颜色，找到breeds目录中最接近的2个品种"""
+    try:
+        # 解码用户图片
+        img_data = base64.b64decode(user_image_base64)
+        user_img = Image.open(io.BytesIO(img_data)).convert("RGB").resize((50, 50))
+        user_pixels = list(user_img.getdata())
+        user_r = int(sum(p[0] for p in user_pixels) / len(user_pixels))
+        user_g = int(sum(p[1] for p in user_pixels) / len(user_pixels))
+        user_b = int(sum(p[2] for p in user_pixels) / len(user_pixels))
+        user_color = (user_r, user_g, user_b)
+    except Exception:
+        return []
+
+    # 获取所有breed图片的颜色
+    breeds_colors = []
+    for fname in os.listdir(BREEDS_DIR):
+        if not fname.lower().endswith((".png", ".jpg", ".jpeg")):
+            continue
+        fpath = os.path.join(BREEDS_DIR, fname)
+        color = _extract_dominant_color(fpath)
+        breeds_colors.append((fname, color))
+
+    # 按颜色距离排序，取最近的2个
+    breeds_colors.sort(key=lambda x: _color_distance(x[1], user_color))
+    return [os.path.splitext(item[0])[0] for item in breeds_colors[:2]]
+
+
+def _find_closest_breeds_by_text(voice_description: str) -> list:
+    """根据文字相似度，从voice_description中找品种名，然后匹配breeds目录"""
+    # 提取描述中的品种关键词
+    breed_keywords = [
+        "拉布拉多", " Labrador", "labrador",
+        "金毛", "金毛猎犬", "Golden Retriever", "golden retriever",
+        "柯基", "威尔士柯基", "corgi", "Corgi",
+        "柴犬", "shiba", "Shiba",
+        "哈士奇", "husky", "Husky",
+        "边牧", "边境牧羊犬", "Border Collie", "border collie",
+        "法斗", "法国斗牛犬", "French Bulldog", "french bulldog",
+        "吉娃娃", "Chihuahua", "chihuahua",
+        "泰迪", "贵宾犬", "Poodle", "poodle",
+        "比格犬", "米格鲁", "Beagle", "beagle",
+        "萨摩耶", "Samoyed", "samoyed",
+        "斑点狗", "大麦町", "Dalmatian", "dalmatian",
+        "中华田园犬", "土狗", "田园犬",
+        "雪纳瑞", "Schnauzer", "schnauzer",
+        "约克夏", "Yorkie", "yorkie",
+        "腊肠", "Dachshund", "dachshund",
+        "西施犬", "西施", "Shih Tzu", "shih tzu",
+        "德牧", "德国牧羊犬", "German Shepherd", "german shepherd",
+        "杰克罗素梗", "Jack Russell", "jack russell", "罗素梗",
+    ]
+
+    voice_lower = voice_description.lower()
+    best_match = None
+    best_score = 0.0
+
+    for kw in breed_keywords:
+        score = _text_similarity(voice_lower, kw.lower())
+        if score > best_score:
+            best_score = score
+            best_match = kw
+
+    # 标准化品种名到breeds文件名
+    breed_name_map = {
+        "拉布拉多": "拉布拉多", "labrador": "拉布拉多", "labrador": "拉布拉多",
+        "金毛": "金毛", "golden retriever": "金毛",
+        "柯基": "柯基", "corgi": "柯基",
+        "柴犬": "柴犬", "shiba": "柴犬",
+        "哈士奇": "哈士奇", "husky": "哈士奇",
+        "边牧": "边牧", "border collie": "边牧",
+        "法斗": "法斗", "french bulldog": "法斗",
+        "吉娃娃": "吉娃娃", "chihuahua": "吉娃娃",
+        "泰迪": "泰迪", "poodle": "泰迪",
+        "比格犬": "比格犬", "beagle": "比格犬",
+        "萨摩耶": "萨摩耶", "samoyed": "萨摩耶",
+        "斑点狗": "斑点狗", "dalmatian": "斑点狗",
+        "中华田园犬": "中华田园犬", "土狗": "中华田园犬",
+        "雪纳瑞": "雪纳瑞", "schnauzer": "雪纳瑞",
+        "约克夏": "约克夏", "yorkie": "约克夏",
+        "腊肠": "腊肠", "dachshund": "腊肠",
+        "西施犬": "西施犬", "shih tzu": "西施犬",
+        "德牧": "德牧", "german shepherd": "德牧",
+        "杰克罗素梗": "比格犬", "jack russell": "比格犬", "罗素梗": "比格犬",
+    }
+
+    # 从描述中提取品种名
+    found_breeds = []
+    desc_lower = voice_description.lower()
+
+    # 精确匹配品种名（中文）
+    for fname in os.listdir(BREEDS_DIR):
+        breed_name = os.path.splitext(fname)[0]
+        if breed_name in voice_description:
+            if breed_name not in found_breeds:
+                found_breeds.append(breed_name)
+
+    # 如果没有精确匹配，用关键词匹配
+    if not found_breeds:
+        for kw, mapped in breed_name_map.items():
+            if kw.lower() in desc_lower:
+                if mapped not in found_breeds:
+                    found_breeds.append(mapped)
+
+    # 如果找到1个，再用文字相似度找第2个
+    if found_breeds:
+        target_name = found_breeds[0]
+        # 找与目标相似度最高的另一个
+        best_second = None
+        best_second_score = 0.0
+        for fname in os.listdir(BREEDS_DIR):
+            breed_name = os.path.splitext(fname)[0]
+            if breed_name == target_name or breed_name in found_breeds:
+                continue
+            score = _text_similarity(target_name, breed_name)
+            if score > best_second_score:
+                best_second_score = score
+                best_second = breed_name
+        if best_second:
+            found_breeds.append(best_second)
+
+    # 如果仍然不足2个，用文字相似度从描述中找
+    if len(found_breeds) < 2:
+        all_breeds = [os.path.splitext(f)[0] for f in os.listdir(BREEDS_DIR)
+                      if f.lower().endswith((".png", ".jpg", ".jpeg"))]
+        desc_for_sim = voice_description
+        scored = [(b, _text_similarity(desc_for_sim, b)) for b in all_breeds]
+        scored.sort(key=lambda x: x[1], reverse=True)
+        for b, s in scored:
+            if b not in found_breeds:
+                found_breeds.append(b)
+            if len(found_breeds) >= 2:
+                break
+
+    return found_breeds[:2]
+
+
+def _remove_green_background(img_bytes: bytes) -> bytes:
+    """抠掉绿色背景，使用HSV颜色空间 chroma key"""
+    try:
+        import numpy as np
+        from PIL import Image
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        arr = np.array(img, dtype=np.float32) / 255.0
+        r_g = arr[:, :, 0]
+        g_g = arr[:, :, 1]
+        b_g = arr[:, :, 2]
+        max_c = np.maximum(np.maximum(r_g, g_g), b_g)
+        min_c = np.minimum(np.minimum(r_g, g_g), b_g)
+        delta = max_c - min_c
+        h = np.zeros_like(max_c)
+        mask_delta = delta > 1e-8
+        idx_r = mask_delta & (max_c == r_g)
+        idx_g = mask_delta & (max_c == g_g)
+        idx_b = mask_delta & (max_c == b_g)
+        h[idx_r] = 60.0 * (((g_g[idx_r] - b_g[idx_r]) / (delta[idx_r] + 1e-8)) % 6.0)
+        h[idx_g] = 60.0 * ((b_g[idx_g] - r_g[idx_g]) / (delta[idx_g] + 1e-8) + 2.0)
+        h[idx_b] = 60.0 * ((r_g[idx_b] - g_g[idx_b]) / (delta[idx_b] + 1e-8) + 4.0)
+        h = h / 360.0
+        s = np.where(max_c > 1e-8, delta / (max_c + 1e-8), 0.0)
+        v = max_c
+        green_mask = (h >= 0.18) & (h <= 0.48) & (s > 0.15) & (v > 0.15)
+        light_green = (h >= 0.18) & (h <= 0.50) & (s > 0.05) & (v > 0.70)
+        green_mask = green_mask | light_green
+        rgba_arr = np.zeros((img.size[1], img.size[0], 4), dtype=np.uint8)
+        rgba_arr[:, :, :3] = (arr * 255).astype(np.uint8)
+        rgba_arr[:, :, 3] = 255
+        rgba_arr[green_mask, 3] = 0
+        result = Image.fromarray(rgba_arr, mode='RGBA')
+        output = io.BytesIO()
+        result.save(output, format="PNG")
+        return output.getvalue()
+    except Exception:
+        return img_bytes
+
+
+def _remove_beige_background(img_bytes: bytes) -> bytes:
+    """抠掉米色背景 RGB(251,232,207)，使用 LAB 颜色空间 chroma key"""
+    try:
+        import numpy as np
+        from PIL import Image
+
+        # 目标背景色
+        TARGET_R, TARGET_G, TARGET_B = 251.0, 232.0, 207.0
+        # 容差（AI生成的背景会有轻微偏差）
+        TOLERANCE = 45.0
+
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        arr = np.array(img, dtype=np.float32)
+
+        # 计算每个像素到目标背景色的欧氏距离
+        dist = np.sqrt(
+            (arr[:, :, 0] - TARGET_R) ** 2 +
+            (arr[:, :, 1] - TARGET_G) ** 2 +
+            (arr[:, :, 2] - TARGET_B) ** 2
+        )
+
+        # 掩码：距离小于容差
+        mask = dist <= TOLERANCE
+
+        # 边缘膨胀：扩大背景掩码，防止残留边缘
+        # 对掩码进行简单膨胀（2次迭代）
+        for _ in range(2):
+            mask = mask | np.roll(mask, 1, axis=0) | np.roll(mask, -1, axis=0)
+            mask = mask | np.roll(mask, 1, axis=1) | np.roll(mask, -1, axis=1)
+
+        # 转 RGBA
+        rgba_arr = np.zeros((img.size[1], img.size[0], 4), dtype=np.uint8)
+        rgba_arr[:, :, :3] = arr.astype(np.uint8)
+        rgba_arr[:, :, 3] = 255
+        rgba_arr[mask, 3] = 0
+
+        result = Image.fromarray(rgba_arr, mode='RGBA')
+        output = io.BytesIO()
+        result.save(output, format="PNG")
+        return output.getvalue()
+    except Exception:
+        return img_bytes
+
+
+def _get_threeview_path(breed_name: str) -> str:
+    """获取品种对应的三视图文件路径"""
+    possible_names = [breed_name, breed_name + "三视图"]
+    for name in possible_names:
+        fpath = os.path.join(THREEVIEWS_DIR, name + ".png")
+        if os.path.exists(fpath):
+            return fpath
+    # 模糊匹配
+    for fname in os.listdir(THREEVIEWS_DIR):
+        if breed_name in fname or fname.replace("三视图", "") == breed_name:
+            return os.path.join(THREEVIEWS_DIR, fname)
+    return None
+
+
+@router.post("/generate-dog-image", tags=["AI"])
+async def generate_dog_image(request: GenerateDogImageRequest):
+    """
+    根据用户描述和可选图片，生成狗狗形象图片。
+    流程：
+    1. 若有上传图片 → 按颜色相似度匹配2个breed
+    2. 若无上传图片 → 从描述中提取品种名，按文字相似度匹配2个breed
+    3. 调用AI图生图（以2个breed的三视图为参考）
+    4. 抠掉绿色背景，返回透明PNG
+    """
+    voice_description = request.voice_description
+    has_photo = request.has_uploaded_photo
+    uploaded_b64 = request.uploaded_photo_base64
+
+    # Step 1 & 2: 找到最接近的2个品种
+    if has_photo and uploaded_b64:
+        breed_names = _find_closest_breeds_by_color(uploaded_b64)
+    else:
+        breed_names = _find_closest_breeds_by_text(voice_description)
+
+    if len(breed_names) < 2:
+        return {
+            "success": False,
+            "message": f"无法找到足够的匹配品种，找到: {breed_names}",
+            "breed_names": breed_names,
+            "image_base64": None
+        }
+
+    # Step 3: 获取三视图路径
+    threeview_paths = []
+    for bn in breed_names:
+        path = _get_threeview_path(bn)
+        if path:
+            threeview_paths.append(path)
+
+    if not threeview_paths:
+        return {
+            "success": False,
+            "message": f"未找到品种对应的三视图: {breed_names}",
+            "breed_names": breed_names,
+            "image_base64": None
+        }
+
+    # 读取三视图base64
+    threeview_b64s = []
+    for p in threeview_paths:
+        with open(p, "rb") as f:
+            threeview_b64s.append(f"data:image/png;base64,{base64.b64encode(f.read()).decode()}")
+
+    # Step 4: 构造提示词
+    breed_display = "、".join(breed_names)
+    if has_photo and uploaded_b64:
+        prompt = (
+            f"参考三视图是{breed_display}品种的示例图，风格为奶油肌理卡通画风，姿态固定。\n"
+            f"生成一只{breed_display}品种狗的三视图主视图（正面视角），"
+            f"以奶油肌理卡通画风呈现，色彩温暖柔和，笔触细腻带有轻微肌理感，造型可爱圆润。\n"
+            f"这只狗的特征描述：{voice_description}。\n"
+            f"用户上传的图片仅用于颜色和花纹的参考（颜色深浅、花纹分布），不得改变品种特征和整体造型。\n"
+            f"动作姿态严格遵循参考三视图，不生成汉字，背景颜色改为RGB(251,232,207)"
+        )
+    else:
+        prompt = (
+            f"参考三视图是{breed_display}品种的示例图，风格为奶油肌理卡通画风，姿态固定。\n"
+            f"生成一只{breed_display}品种狗的三视图主视图（正面视角），"
+            f"以奶油肌理卡通画风呈现，色彩温暖柔和，笔触细腻带有轻微肌理感，造型可爱圆润。\n"
+            f"这只狗的特征描述：{voice_description}。\n"
+            f"动作姿态严格遵循参考三视图，不生成汉字，背景颜色改为RGB(251,232,207)"
+        )
+
+    # Step 5: 调用AI生成图片（使用 requests 直接调用，与 doggenerate 脚本方式一致）
+    try:
+        import httpx
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+
+        ark_url = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
+        if not ark_url.endswith("/images/generations"):
+            ark_url = ark_url.rstrip("/") + "/images/generations"
+        ark_key = os.getenv("ARK_API_KEY")
+        if not ark_key:
+            raise Exception("ARK_API_KEY not set in environment")
+
+        headers = {
+            "Authorization": f"Bearer {ark_key}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "doubao-seedream-5-0-260128",
+            "prompt": prompt,
+            "size": "2K",
+            "response_format": "url",
+            "watermark": False,
+            "sequential_image_generation": "disabled",
+            "image": threeview_b64s
+        }
+        resp = httpx.post(ark_url, headers=headers, json=payload, timeout=300.0)
+        resp.raise_for_status()
+        result_data = resp.json()
+        image_url = result_data["data"][0]["url"]
+
+        # Step 6: 下载生成的图片并抠背景
+        img_response = httpx.get(image_url, timeout=120.0)
+        img_response.raise_for_status()
+        generated_bytes = img_response.content
+
+        # 抠掉米色背景
+        transparent_bytes = _remove_beige_background(generated_bytes)
+        result_b64 = base64.b64encode(transparent_bytes).decode()
+
+        return {
+            "success": True,
+            "message": "图片生成成功",
+            "breed_names": breed_names,
+            "image_base64": result_b64,
+            "threeview_refs": [os.path.basename(p) for p in threeview_paths],
+            "prompt_used": prompt
+        }
+
+    except httpx.TransportError as e:
+        err_msg = str(e)
+        is_timeout = any(kw in err_msg.lower() for kw in ["timed out", "timeout", "write operation"])
+        return {
+            "success": False,
+            "message": f"图片生成超时（AI服务响应过慢）: {err_msg}",
+            "breed_names": breed_names,
+            "image_base64": None,
+            "retryable": is_timeout
+        }
+    except httpx.HTTPStatusError as e:
+        return {
+            "success": False,
+            "message": f"图片生成请求失败（HTTP {e.response.status_code}）: {str(e)}",
+            "breed_names": breed_names,
+            "image_base64": None
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "message": f"图片生成失败: {str(e)}",
+            "breed_names": breed_names,
+            "image_base64": None
+        }

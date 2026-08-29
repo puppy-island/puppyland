@@ -458,3 +458,9 @@ class DailyLetterResponse(DailyLetterBase):
 
 class GenerateLetterRequest(BaseModel):
     letter_date: Optional[str] = None  # 不传则默认今天
+
+# Dog Image Generation schemas
+class GenerateDogImageRequest(BaseModel):
+    voice_description: str                      # 用户输入内容1
+    has_uploaded_photo: bool = False          # 是否上传了图片
+    uploaded_photo_base64: Optional[str] = None  # 上传图片的base64（无data URI前缀）
