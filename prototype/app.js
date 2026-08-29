@@ -27,6 +27,9 @@
     scene: 'journey',
     petName: '',
     hasPhoto: false,
+    generatedDogImage: null,   // AI生成的狗狗形象（base64，无data URI前缀）
+    generatingDogImage: false, // 是否有生成请求正在进行中
+    dogGenController: null,    // 当前AI生成请求的AbortController，用于取消旧请求
     detail: 0,                      // 形象清晰度 0–1，信息不足即保持低细节 Base 形象
     journey: {
       stage: 'PET_CREATION',
@@ -68,6 +71,10 @@
       if (typeof S.story.homeLightsOn !== 'boolean') S.story.homeLightsOn = true;
       if (!Array.isArray(S.conversations)) S.conversations = [];
       if (!Array.isArray(S.dailyLetters)) S.dailyLetters = [];
+      if (typeof S.generatedDogImage === 'undefined') S.generatedDogImage = null;
+      if (typeof S.generatingDogImage === 'undefined') S.generatingDogImage = false;
+      S.dogGenController = null;
+      S._retryTimer = null;
       return true;
     } catch (e) { return false; }
   }
@@ -78,12 +85,18 @@
 
   function apiRequest(path, options) {
     options = options || {};
-    var controller = window.AbortController ? new AbortController() : null;
-    var timer = controller ? setTimeout(function () { controller.abort(); }, options.timeout || 8000) : null;
+    var externalSignal = options.signal || null;
+    var controller = null;
+    var timer = null;
+    if (!externalSignal && window.AbortController) {
+      controller = new AbortController();
+      timer = setTimeout(function () { controller.abort(); }, options.timeout || 8000);
+    }
     var headers = options.headers || {};
     if (options.body && !(options.body instanceof FormData) && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
     var req = Object.assign({}, options, { headers: headers });
-    if (controller) req.signal = controller.signal;
+    if (externalSignal) req.signal = externalSignal;
+    else if (controller) req.signal = controller.signal;
     return fetch(API_BASE + path, req).then(function (res) {
       if (!res.ok) throw new Error('API ' + res.status);
       return res.json();
@@ -117,7 +130,7 @@
     }
   }
 
-  async function syncPetPhoto(file) {
+  async function syncPetPhoto(file, base64DataUrl) {
     if (!file) return null;
     try {
       var form = new FormData(); form.append('file', file);
@@ -127,9 +140,117 @@
         await apiRequest('/pets/' + S.backendPetId, { method: 'PUT', body: JSON.stringify({ avatar_url: url }) });
       }
       S.journey.petReferenceImage = url;
+      S.journey.petReferenceImageBase64 = base64DataUrl || null;
       save();
       return url;
     } catch (e) { return null; }
+  }
+
+  // 触发AI生成狗狗形象图片
+  async function triggerDogImageGeneration() {
+    // 清除上一次abort后设置的retry timer，避免与新请求竞争
+    if (S._retryTimer) { clearTimeout(S._retryTimer); S._retryTimer = null; }
+    // 如果已有旧请求在进行中，abort掉（建立新宠物时会触发）
+    if (S.dogGenController) {
+      S.dogGenController.abort();
+      S.dogGenController = null;
+      S.generatingDogImage = false;
+      console.log('[triggerDogImageGeneration] 终止了旧请求，开始新请求');
+    }
+    // 防止重复并发请求
+    if (S.generatingDogImage) {
+      console.log('[triggerDogImageGeneration] 已有生成请求在进行中，跳过此次调用');
+      return;
+    }
+    S.generatingDogImage = true;
+    // 创建新的AbortController供apiRequest使用
+    var controller = new AbortController();
+    S.dogGenController = controller;
+    save();
+    try {
+      var payload = {
+        voice_description: S.journey.voiceDescription || '',
+        has_uploaded_photo: !!S.journey.petReferenceImage,
+        uploaded_photo_base64: null
+      };
+      // 如果有上传照片，直接使用已存储的base64（无需再走HTTP fetch）
+      if (payload.has_uploaded_photo && S.journey.petReferenceImageBase64) {
+        try {
+          payload.uploaded_photo_base64 = S.journey.petReferenceImageBase64.replace(/^data:image\/\w+;base64,/, '');
+        } catch (imgErr) {
+          payload.has_uploaded_photo = false;
+          payload.uploaded_photo_base64 = null;
+        }
+      } else if (payload.has_uploaded_photo && S.journey.petReferenceImage) {
+        // 兜底：走HTTP fetch（可能因跨域失败）
+        try {
+          var refImg = new Image();
+          refImg.crossOrigin = 'anonymous';
+          await new Promise(function (res, rej) {
+            refImg.onload = res; refImg.onerror = rej;
+            refImg.src = S.journey.petReferenceImage;
+          });
+          var canvas = document.createElement('canvas');
+          canvas.width = refImg.naturalWidth || refImg.width;
+          canvas.height = refImg.naturalHeight || refImg.height;
+          var ctx = canvas.getContext('2d');
+          ctx.drawImage(refImg, 0, 0);
+          var dataUrl = canvas.toDataURL('image/png');
+          payload.uploaded_photo_base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+        } catch (imgErr) {
+          payload.has_uploaded_photo = false;
+          payload.uploaded_photo_base64 = null;
+        }
+      }
+      var result = await apiRequest('/generate-dog-image', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+      console.log('[triggerDogImageGeneration] result:', JSON.stringify(result).substring(0, 200));
+      S.dogGenController = null;
+      if (result && result.success && result.image_base64) {
+        S.generatedDogImage = result.image_base64;
+        S.generatingDogImage = false;
+        save();
+        console.log('[triggerDogImageGeneration] 狗狗图片已生成并保存，长度:', result.image_base64.length);
+        // 图片生成后如果当前在home场景，立即显示
+        if (S.scene === 'home') {
+          var homePetEl = $('#homePet');
+          if (homePetEl) {
+            var existingImg = homePetEl.querySelector('.generated-dog-img');
+            if (existingImg) existingImg.remove();
+            var img = document.createElement('img');
+            img.className = 'generated-dog-img';
+            img.src = 'data:image/png;base64,' + S.generatedDogImage;
+            img.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain;pointer-events:none;';
+            homePetEl.style.position = 'relative';
+            homePetEl.appendChild(img);
+          }
+        }
+      } else if (result) {
+        S.generatingDogImage = false;
+        save();
+        console.warn('[triggerDogImageGeneration] 生成失败:', result.message, 'breeds:', result.breed_names);
+        // 如果服务端返回可重试标志，等待后重试
+        if (result.retryable) {
+          console.log('[triggerDogImageGeneration] 服务端提示可重试，5秒后重试...');
+          var retryTimer = setTimeout(function () { triggerDogImageGeneration(); }, 5000);
+          S._retryTimer = retryTimer;
+        }
+      }
+    } catch (e) {
+      console.error('[triggerDogImageGeneration] 请求异常:', e.message);
+      S.dogGenController = null;
+      S.generatingDogImage = false;
+      save();
+      // 网络中断或页面跳转导致，重试一次
+      if (e.message && e.message.includes('aborted')) {
+        console.log('[triggerDogImageGeneration] 请求被中断，2秒后重试...');
+        var retryTimer = setTimeout(function () { triggerDogImageGeneration(); }, 2000);
+        S._retryTimer = retryTimer;
+      }
+    }
   }
 
   var MEMORY_TYPE_MAP = {
@@ -331,6 +452,7 @@
 
       ws.onopen = function () {
         function push() {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
           if (off >= pcm.byteLength) {
             if (!uploaded) { uploaded = true; ws.send(JSON.stringify({ type: 'end' })); }
             return;
@@ -818,6 +940,10 @@
     $('#journeyCopy').textContent = '一个模糊的轮廓正在出现，真正的样子还在慢慢生成。';
     journeyProgress(); journeyWorldLevel(); save();
     clearTimeout(journeyTimer);
+    // 触发AI生成狗狗形象（异步，不阻塞主流程），已有请求在进行中则跳过
+    if (!S.generatingDogImage) {
+      triggerDogImageGeneration();
+    }
   }
 
   function initJourney() {
@@ -1104,7 +1230,7 @@
           S.journey.isRegenerating = true;
           $('#journeyCopy').textContent = '照片收好啦。我们继续往前走。';
           $('#journeyConfirmBtn').disabled = true;
-          syncPetPhoto(file);
+          syncPetPhoto(file, reader.result);
           setTimeout(function () {
             S.journey.isRegenerating = false; S.hasPhoto = true;
             $('#journeyConfirmBtn').disabled = false;
@@ -1264,6 +1390,20 @@
         if (S.scene === 'home') showHomeReaction($('#homePet'), '我想起来啦。原来，这就是我。');
       }, 650);
     }
+    // 如果有AI生成的狗狗图片，显示在homePet位置（每次进入home都检查，不依赖customRevealShown）
+    if (S.generatedDogImage) {
+      var homePetEl = $('#homePet');
+      if (homePetEl) {
+        var existingImg = homePetEl.querySelector('.generated-dog-img');
+        if (existingImg) existingImg.remove();
+        var img = document.createElement('img');
+        img.className = 'generated-dog-img';
+        img.src = 'data:image/png;base64,' + S.generatedDogImage;
+        img.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain;pointer-events:none;';
+        homePetEl.style.position = 'relative';
+        homePetEl.appendChild(img);
+      }
+    }
   }
 
   $('#homeLamp').addEventListener('click', function () { setHomeLights(!S.story.homeLightsOn, true); });
@@ -1275,6 +1415,28 @@
   $('#homePet').addEventListener('click', function () {
     goto('companion');
   });
+  // 每次进入home场景时尝试显示AI生成的狗狗图片
+  (function () {
+    var origGoto = goto;
+    window.goto = function (name) {
+      origGoto(name);
+      if (name === 'home' && S.generatedDogImage) {
+        setTimeout(function () {
+          var homePetEl = $('#homePet');
+          if (homePetEl) {
+            var existingImg = homePetEl.querySelector('.generated-dog-img');
+            if (existingImg) existingImg.remove();
+            var img = document.createElement('img');
+            img.className = 'generated-dog-img';
+            img.src = 'data:image/png;base64,' + S.generatedDogImage;
+            img.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain;pointer-events:none;';
+            homePetEl.style.position = 'relative';
+            homePetEl.appendChild(img);
+          }
+        }, 100);
+      }
+    };
+  })();
   $('#letterClose').addEventListener('click', function () { $('#letterSheet').hidden = true; goto('home'); });
   $('#homeBack').addEventListener('click', function () { goto('home'); });
 
@@ -1537,7 +1699,19 @@
 
   window.__mh = { S: S, goto: goto, reset: reset, addMemory: addMemory, addPaw: addPaw };  // 调试用
 
+  // 页面卸载时清除生成图片的重试timer，避免刷新后与新请求冲突
+  window.addEventListener('beforeunload', function () {
+    if (S._retryTimer) { clearTimeout(S._retryTimer); S._retryTimer = null; }
+  });
+
   var resumed = REVIEW_MODE ? false : load();
+  // 页面恢复时：如果generatingDogImage=true但generatedDogImage=null，说明刷新前请求中断了，重试
+  if (!REVIEW_MODE && S.generatingDogImage && !S.generatedDogImage) {
+    S.generatingDogImage = false;
+    save();
+    console.log('[triggerDogImageGeneration] 页面恢复检测到中断的生成请求，2秒后重试...');
+    setTimeout(function () { triggerDogImageGeneration(); }, 2000);
+  }
   if (window.PUPPYLAND_FULL_DEMO) {
     S.scene = 'journey';
     S.journey.stage = 'PET_CREATION';
