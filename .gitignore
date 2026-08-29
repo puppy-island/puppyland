@@ -8,6 +8,9 @@
 # 构建产物：由 prototype/build.py 生成
 prototype/dist/
 
+# Isolated implementation worktrees
+.worktrees/
+
 # 环境配置和数据库（敏感）
 .env
 *.db
