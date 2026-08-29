@@ -215,6 +215,9 @@ class ChatRequest(BaseModel):
     message: str
     conversation_history: Optional[List[ChatMessageResponse]] = None
 
+class GenerateBeatRequest(BaseModel):
+    previous_beat: Optional[str] = None
+
 # Pet animation state schemas (2D世界宠物状态)
 class PetStateUpdate(BaseModel):
     pos_x: Optional[float] = None           # X坐标
