@@ -19,7 +19,8 @@ RUN python prototype/build.py
 
 WORKDIR /app/prototype/dist
 
-# Replace the default API URL with the Docker backend URL at container start
+# 容器启动时：如果传入了 PUPPYLAND_API（如 http://backend:8001）则替换内置的后端地址；
+# 为空时保持内置默认值（localhost:8001，本地开发用），由 Caddy 在运行时做反代。
 CMD ["sh", "-c", "\
-sed -i 's|http://localhost:8001/api/v1|$$PUPPYLAND_API/api/v1|g' index.html && \
+sed -i 's|http://localhost:8001/api/v1|${PUPPYLAND_API:-http://localhost:8001}/api/v1|g' index.html && \
 python -m http.server 4321"]

@@ -1,0 +1,26 @@
+{
+    # 内网/演示环境：关闭自动 HTTPS（避免 HTTP → HTTPS 全局重定向）
+    # 注意：麦克风需要 HTTPS，生产环境请配置真实域名 + Let's Encrypt 证书
+    auto_https off
+}
+
+:4321 {
+    # 使用 Caddy 本地 CA 签发自签证书
+    # - 自签证书不受浏览器信任，首次访问会显示"不安全"，但连接已加密
+    # - 麦克风功能仅在 HTTPS 下可用（浏览器安全限制）
+    # - 部署后需将根证书 ca.crt（docker volume caddy_data 中）导入系统受信任根证书
+    tls internal
+    encode gzip
+
+    # 后端 API 与上传资源走 backend:8001（内部 HTTP，由 Caddy 终结 TLS）
+    reverse_proxy /api/*         backend:8001
+    reverse_proxy /uploads/*     backend:8001
+    reverse_proxy /docs          backend:8001
+    reverse_proxy /docs/*        backend:8001
+    reverse_proxy /redoc         backend:8001
+    reverse_proxy /openapi.json  backend:8001
+    reverse_proxy /health        backend:8001
+
+    # 其余（前端页面）走 frontend:4321
+    reverse_proxy frontend:4321
+}
