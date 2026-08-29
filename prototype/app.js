@@ -256,45 +256,51 @@
       .then(function(data) {
         var url = data.url;
         var ws = new WebSocket(url);
-        var closed = false;
+        var done = false;          // callback 是否已调用，防止重复
         var transcripts = [];
 
+        // 通用完成处理：只调用一次 callback
+        function finish(text) {
+          if (done) return;
+          done = true;
+          ws.close();
+          callback(text || null);
+        }
+
+        // 超时兜底：8 秒内没有结果则降级
+        var timer = setTimeout(function() { finish(''); }, 8000);
+
         ws.onopen = function() {
-          // 2. 将音频 blob 转为 ArrayBuffer，再逐片发送 PCM
+          // 2. 将音频 blob 转为 ArrayBuffer，再逐片发送
           var reader = new FileReader();
           reader.onload = function(ev) {
             var buffer = ev.target.result;
-            // 发送音频数据
-            ws.send(buffer);
-            // 3. 发送结束信号
-            ws.send(JSON.stringify({ type: 'end' }));
+            ws.send(buffer);                        // 发送音频
+            ws.send(JSON.stringify({ type: 'end' })); // 发送结束信号
           };
           reader.readAsArrayBuffer(audioBlob);
         };
 
         ws.onmessage = function(ev) {
+          clearTimeout(timer);
           try {
             var msg = JSON.parse(ev.data);
-            // 腾讯云 ASR 返回格式：{ result: { voice_text_str: "..." }, slice_type: 2 }
+            // 腾讯云 ASR：result.voice_text_str 为累积文本，slice_type 2=最终结果 4=流结束
             if (msg.result && msg.result.voice_text_str) {
               transcripts.push(msg.result.voice_text_str);
             }
-            // slice_type == 2 表示这段语音已经转写完毕（最终结果）
             if (msg.slice_type === 2) {
-              closed = true;
-              ws.close();
+              // 最终结果到达，立即结束（不再等 onclose）
+              finish(transcripts.join(''));
             }
           } catch(e) {}
         };
 
-        ws.onerror = function() {
-          if (!closed) { closed = true; ws.close(); }
-        };
+        ws.onerror = function() { finish(''); };
 
         ws.onclose = function() {
-          // 合并所有分片转写结果
-          var text = transcripts.join('');
-          callback(text || null);
+          clearTimeout(timer);
+          if (!done) finish(transcripts.join(''));
         };
       })
       .catch(function() {
@@ -687,24 +693,313 @@
         }
         if (S.journey.sceneIndex === 2) { S.journey.stage = 'HOME_GENERATING'; goto('weave'); }
       });
-      $('#journeyVoice').addEventListener('click', function () {
-        var voice = this;
-        if (voice.disabled) return;
-        voice.disabled = true; voice.classList.add('is-listening');
-        $('#journeyVoiceLabel').textContent = '正在听…松开后，TA 会慢慢出现';
-        setTimeout(async function () {
-          S.petName = S.petName || mockASR('name');
-          S.journey.voiceDescription = mockASR('meet');
-          S.journey.petImage = 'assets/pet-idle.webp';
-          S.hasPhoto = true;
-          interpret(S.journey.voiceDescription);
-          await ensureBackendPet();
-          S.journey.stage = 'PET_CONFIRM'; setDetail(0.35); journeyWorld.classList.remove('is-running'); journeyCardReset(); journeyConfirm.hidden = false;
-          $('#journeyKicker').textContent = ''; $('#journeyTitle').textContent = '我想起来啦'; $('#journeyCopy').textContent = '我是这样的一只小狗对嘛？';
-          journeyProgress(); journeyWorldLevel(); save();
-          voice.disabled = false; voice.classList.remove('is-listening');
-        }, 1100);
+      // journeyVoice：按住爪印录音，松开后转写，进入宠物确认页
+      var jv = $('#journeyVoice');
+      var jvMediaRecorder = null;
+      var jvAudioChunks = [];
+      var jvPermitted = false;
+      var jvPending = false;
+      var jvStartTime = 0;
+      var jvReleased = false;
+      var jvTimerInterval = null;
+      var jvMaxTimer = null;   // 60秒自动停止
+
+      function finishRecording() {
+        if (jvTimerInterval) { clearInterval(jvTimerInterval); jvTimerInterval = null; }
+        if (jvMaxTimer) { clearTimeout(jvMaxTimer); jvMaxTimer = null; }
+        if (!jvMediaRecorder) return;
+        jvMediaRecorder.stream.getTracks().forEach(function (t) { t.stop(); });
+        $('#recTip').textContent = '正在转写…';
+        $('#recGuidance').hidden = true;
+        $('#recTimer').hidden = true;
+        recOverlay.hidden = true;
+        jvMediaRecorder.onstop = function () {
+          var blob = new Blob(jvAudioChunks, { type: 'audio/webm' });
+          jvAudioChunks = [];
+          doASR(blob, function (text) {
+            jvMediaRecorder = null;
+            onJourneyVoiceResult(text || mockASR('meet'));
+          });
+        };
+        jvMediaRecorder.stop();
+      }
+
+      function startRecordingTimer() {
+        // 更新计时器显示
+        var seconds = 0;
+        jvTimerInterval = setInterval(function () {
+          seconds++;
+          $('#recTimer').textContent = seconds + ' 秒';
+          if (seconds >= 60) {
+            finishRecording();
+          }
+        }, 1000);
+        // 60秒自动停止
+        jvMaxTimer = setTimeout(finishRecording, 60000);
+      }
+
+      jv.addEventListener('pointerdown', function (e) {
+        e.preventDefault();
+        jv.classList.add('is-holding');
+        recOverlay.hidden = false;
+        $('#recTip').textContent = '请稍候…';
+        $('#recGuidance').hidden = false;
+        $('#recTimer').hidden = false;
+        $('#recTimer').textContent = '0 秒';
+        jvAudioChunks = [];
+        jvPermitted = false;
+        jvPending = true;
+        jvReleased = false;
+
+        navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+          jvPermitted = true;
+          jvPending = false;
+          jvStartTime = Date.now();
+          $('#recTip').textContent = '松开结束';
+          $('#recGuidance').hidden = true;   // 授权后隐藏引导词，专注录音
+          jvMediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+          jvMediaRecorder.ondataavailable = function (ev) {
+            if (ev.data.size > 0) jvAudioChunks.push(ev.data);
+          };
+          jvMediaRecorder.start(100);
+          startRecordingTimer();
+          if (jvReleased) finishRecording();
+        }).catch(function () {
+          jvPending = false;
+          recOverlay.hidden = true;
+          jv.classList.remove('is-holding');
+          onJourneyVoiceResult(mockASR('meet'));
+        });
       });
+
+      jv.addEventListener('pointerup', function () {
+        if (!jv.classList.contains('is-holding')) return;
+        jv.classList.remove('is-holding');
+
+        if (jvPending) {
+          jvReleased = true;
+          $('#recTip').textContent = '正在等待…';
+          return;
+        }
+
+        if (!jvMediaRecorder) {
+          onJourneyVoiceResult(mockASR('meet'));
+          return;
+        }
+
+        var dur = Date.now() - jvStartTime;
+        if (dur < 550) {
+          // 太短：停止计时和录音，但不跳场景
+          if (jvTimerInterval) { clearInterval(jvTimerInterval); jvTimerInterval = null; }
+          if (jvMaxTimer) { clearTimeout(jvMaxTimer); jvMaxTimer = null; }
+          jvMediaRecorder.stream.getTracks().forEach(function (t) { t.stop(); });
+          jvMediaRecorder = null;
+          recOverlay.hidden = true;
+          $('#recGuidance').hidden = true;
+          $('#recTimer').hidden = true;
+          $('#journeyVoiceLabel').textContent = '太短了，再按久一点';
+          return;
+        }
+
+        finishRecording();
+      });
+
+      jv.addEventListener('pointerleave', function () {
+        if (!jv.classList.contains('is-holding')) return;
+        jv.classList.remove('is-holding');
+        recOverlay.hidden = true;
+        jvPending = false;
+        jvReleased = false;
+        if (jvTimerInterval) { clearInterval(jvTimerInterval); jvTimerInterval = null; }
+        if (jvMaxTimer) { clearTimeout(jvMaxTimer); jvMaxTimer = null; }
+        if (jvMediaRecorder) {
+          jvMediaRecorder.stream.getTracks().forEach(function (t) { t.stop(); });
+          jvMediaRecorder = null;
+        }
+        $('#recGuidance').hidden = true;
+        $('#recTimer').hidden = true;
+      });
+
+      jv.addEventListener('pointercancel', function () {
+        jv.classList.remove('is-holding');
+        recOverlay.hidden = true;
+        jvPending = false;
+        jvReleased = false;
+        if (jvTimerInterval) { clearInterval(jvTimerInterval); jvTimerInterval = null; }
+        if (jvMaxTimer) { clearTimeout(jvMaxTimer); jvMaxTimer = null; }
+        if (jvMediaRecorder) {
+          jvMediaRecorder.stream.getTracks().forEach(function (t) { t.stop(); });
+          jvMediaRecorder = null;
+        }
+        $('#recGuidance').hidden = true;
+        $('#recTimer').hidden = true;
+      });
+
+      // 预设名字列表（用于正则快速匹配）
+      var PRESET_NAMES = ['豆豆', '年糕', '团子', '煤球', '花卷', '布丁', '小白', '旺财', '来福', '球球', '嘟嘟', '果冻', '奶茶', '饼干', '麻薯'];
+
+      // 正则从文本中提取宠物名字（不限定字符类型，用标点和长度作边界）
+      function extractNameByRegex(text) {
+        if (!text) return null;
+        // 1. "它/他/她叫XXX" 或 "叫XXX"（名字1-20字，以标点/空格/句尾截止）
+        var m = text.match(/[它他她]?叫([^\s，,。！？、；:：""''（）()]{1,20})/);
+        if (m) return m[1];
+        // 2. "名字是XXX" 或 "TA叫XXX"（名字1-20字）
+        m = text.match(/(?:名字|它叫|他叫|她叫)([^\s，,。！？、；:：""''（）()]{1,20})/);
+        if (m) return m[1];
+        // 3. "他叫XX，是YY" → 提取 XX
+        m = text.match(/[它他她]叫([^\s，,。！？、；:：""''（）()]{1,20})[，,]?[是为]?/);
+        if (m) return m[1];
+        // 4. "他叫XX，YY" → 提取 XX（无"是"字）
+        m = text.match(/[它他她]叫([^\s，,。！？、；:：""''（）()]{1,20})[,，]/);
+        if (m) return m[1];
+        // 5. "它的名字是XXXX" → 提取 XXXX
+        m = text.match(/(?:它的名字|他名字|她名字)是([^\s，,。！？、；:：""''（）()]{1,20})/);
+        if (m) return m[1];
+        // 6. 开头"XX叫/是"且紧接着是描述，但"叫/是"后必须是另一个词而非"的"（排除"叫得很欢"）
+        m = text.match(/^([^\s，,。！？、；:：""''（）()]{1,6})(?:叫|是)(?!['"]?[的得])[^\s，,]/);
+        if (m) return m[1];
+        // 精确匹配预设名字（兜底）
+        for (var i = 0; i < PRESET_NAMES.length; i++) {
+          if (text.indexOf(PRESET_NAMES[i]) >= 0) return PRESET_NAMES[i];
+        }
+        return null;
+      }
+
+      // 从后端 LLM 提取名字
+      function extractNameByLLM(text, callback) {
+        fetch(API_BASE + '/pets/' + (S.backendPetId || '') + '/extract-name', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: text })
+        })
+          .then(function (res) { return res.json(); })
+          .then(function (data) { callback(data.name || ''); })
+          .catch(function () { callback(''); });
+      }
+
+      // 显示语音识别结果确认界面
+      function showVoiceConfirm(name, description) {
+        journeyCreator.hidden = true;
+        var confirmBox = $('#journeyVoiceConfirm') || createVoiceConfirmUI();
+        confirmBox.hidden = false;
+        $('#journeyConfirmName').value = name;
+        $('#journeyConfirmDesc').value = description;
+        $('#journeyConfirmName').focus();
+      }
+
+      function createVoiceConfirmUI() {
+        var wrapper = document.createElement('div');
+        wrapper.id = 'journeyVoiceConfirm';
+        wrapper.className = 'journey-creator';
+        wrapper.style.gap = '10px';
+        wrapper.style.marginTop = '2px';
+
+        var nameRow = document.createElement('div');
+        nameRow.style.display = 'flex';
+        nameRow.style.alignItems = 'center';
+        nameRow.style.gap = '8px';
+
+        var nameLabel = document.createElement('span');
+        nameLabel.style.cssText = 'font-size:12px;color:#8A7869;white-space:nowrap;';
+        nameLabel.textContent = 'TA 叫';
+        var nameInput = document.createElement('input');
+        nameInput.type = 'text';
+        nameInput.id = 'journeyConfirmName';
+        nameInput.className = 'journey-input';
+        nameInput.placeholder = '还没起名字…';
+        nameInput.style.flex = '1';
+        nameRow.appendChild(nameLabel);
+        nameRow.appendChild(nameInput);
+
+        var descInput = document.createElement('textarea');
+        descInput.id = 'journeyConfirmDesc';
+        descInput.className = 'journey-input';
+        descInput.rows = 3;
+        descInput.placeholder = '说说你们的故事…';
+        descInput.style.resize = 'none';
+
+        var btnRow = document.createElement('div');
+        btnRow.style.display = 'flex';
+        btnRow.style.gap = '10px';
+        btnRow.style.justifyContent = 'center';
+
+        var retryBtn = document.createElement('button');
+        retryBtn.type = 'button';
+        retryBtn.className = 'ghost-btn';
+        retryBtn.textContent = '重新说';
+        retryBtn.style.fontSize = '13px';
+        retryBtn.addEventListener('click', function () {
+          $('#journeyVoiceConfirm').hidden = true;
+          journeyCreator.hidden = false;
+        });
+
+        var okBtn = document.createElement('button');
+        okBtn.type = 'button';
+        okBtn.className = 'primary-btn';
+        okBtn.textContent = '确认';
+        okBtn.addEventListener('click', function () {
+          var name = $('#journeyConfirmName').value.trim();
+          var desc = $('#journeyConfirmDesc').value.trim();
+          $('#journeyVoiceConfirm').hidden = true;
+          onVoiceConfirm(name, desc);
+        });
+
+        btnRow.appendChild(retryBtn);
+        btnRow.appendChild(okBtn);
+
+        wrapper.appendChild(nameRow);
+        wrapper.appendChild(descInput);
+        wrapper.appendChild(btnRow);
+
+        // 插入到 journeyCreator 之后
+        journeyCreator.parentNode.insertBefore(wrapper, journeyCreator.nextSibling);
+        return wrapper;
+      }
+
+      function onVoiceConfirm(name, description) {
+        S.petName = name || mockASR('name');
+        S.journey.voiceDescription = description || mockASR('meet');
+        S.journey.petImage = 'assets/pet-idle.webp';
+        S.hasPhoto = true;
+        interpret(S.journey.voiceDescription);
+        ensureBackendPet().then(function () {
+          S.journey.stage = 'PET_CONFIRM';
+          setDetail(0.35);
+          journeyWorld.classList.remove('is-running');
+          journeyCardReset();
+          journeyConfirm.hidden = false;
+          $('#journeyKicker').textContent = '';
+          $('#journeyTitle').textContent = '我想起来啦';
+          $('#journeyCopy').textContent = '我是这样的一只小狗对嘛？';
+          journeyProgress();
+          journeyWorldLevel();
+          save();
+        });
+      }
+
+      function onJourneyVoiceResult(text) {
+        var rawText = text || mockASR('meet');
+        // 1. 正则优先提取名字
+        var name = extractNameByRegex(rawText);
+        if (name) {
+          showVoiceConfirm(name, rawText);
+          return;
+        }
+        // 2. 正则匹配不到，且 pet 已创建（backendPetId 存在），调 LLM 二次识别
+        if (S.backendPetId) {
+          extractNameByLLM(rawText, function (llmName) {
+            if (llmName) {
+              showVoiceConfirm(llmName, rawText);
+            } else {
+              showVoiceConfirm('', rawText);
+            }
+          });
+        } else {
+          // pet 还未创建，无法调 LLM，直接用空名字显示描述
+          showVoiceConfirm('', rawText);
+        }
+      }
       $('#journeyRegeneratePhoto').addEventListener('change', function () {
         var file = this.files && this.files[0]; if (!file) return;
         var reader = new FileReader();

@@ -1114,6 +1114,59 @@ def generate_beat(pet_id: int, request: GenerateBeatRequest = None):
             ]
             return random.choice(fallback_beats)
 
+@router.post("/pets/{pet_id}/extract-name", tags=["AI"])
+def extract_pet_name(pet_id: int, body: dict = None):
+    """
+    从用户语音描述中提取宠物名字
+    正则优先匹配，前端已处理；此接口供前端正则匹配失败时调用 LLM 二次识别
+    """
+    text = (body or {}).get("text", "") if body else ""
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM pets WHERE id = ?", (pet_id,))
+        pet = dict_from_row(cursor.fetchone())
+        if not pet:
+            raise HTTPException(status_code=404, detail="Pet not found")
+
+    pet_name = pet.get("name", "TA")
+
+    system_prompt = f"""你是一个宠物名字提取助手。用户说了一段关于TA的宠物的话：
+
+"{text}"
+
+请从中提取宠物的名字（如果有的话）。只返回名字本身，不要加任何标点或解释。
+如果找不到明确的名字，返回空字符串。"""
+
+    try:
+        from openai import OpenAI
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+
+        client = OpenAI(
+            api_key=os.getenv("api_key"),
+            base_url=os.getenv("base_url")
+        )
+
+        response = client.chat.completions.create(
+            model=os.getenv("model", "deepseek-v4-flash"),
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"从这句话里找出宠物的名字：{text}"}
+            ],
+            temperature=0.3,
+            max_tokens=20
+        )
+
+        name = response.choices[0].message.content.strip()
+        # 清理可能残留的引号
+        name = re.sub(r'^["""\'"\'"]+|["""\'"\'"]+$', '', name)
+
+        return {"name": name if name else ""}
+
+    except Exception:
+        return {"name": ""}
+
 # ============ Pet State Routes (2D Animation) ============
 
 @router.post("/pets/{pet_id}/state", response_model=PetStateResponse, tags=["PetState"])
