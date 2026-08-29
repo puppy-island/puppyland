@@ -650,13 +650,13 @@ body{
 .neighborhood-map>img{ width:100%; height:100%; display:block; object-fit:cover; }
 .neighborhood-scene.is-settled .neighborhood-map{ opacity:1; transform:scale(1); }
 .neighborhood-scene.is-entering .neighborhood-map{ opacity:1; transform:translateY(-11%) scale(2.4); filter:saturate(.92) brightness(1.05); }
-/* 推镜末尾交叉淡入房子特写。用的就是主页那张 home-v2.png，渲染方式与 .home-art
+/* 推镜末尾交叉淡入房子特写。用的就是主页那张 home-v3.png，渲染方式与 .home-art
    完全一致，所以切到 home 场景时画面重合，房子不跳、不换姿势。
    社区图只有 1086x1448 且压缩很重，推镜到 2.4 倍已是它的分辨率上限，
    再往里推必须靠这一层，不能靠放大原图。 */
 .neighborhood-closeup{
   position:absolute; inset:0; z-index:3; opacity:0; pointer-events:none;
-  background:#EBD7BE url("assets/home-v2.png") center / 100% auto no-repeat;
+  background:#EBD7BE url("assets/home-v3.png") center / 100% auto no-repeat;
   transition:opacity 1s var(--ease);
 }
 .neighborhood-scene.is-closeup .neighborhood-closeup{ opacity:1; }
@@ -704,7 +704,7 @@ body{
 .home-art{
   position:absolute; inset:0;
   /* 按参考图比例显示，房子不被拉伸；底部以纸张色延展 */
-  background:#EBD7BE url("assets/home-v2.png") center / 100% auto no-repeat;
+  background:#EBD7BE url("assets/home-v3.png") center / 100% auto no-repeat;
   transition:filter 1.1s var(--ease), transform 1.1s var(--ease);
 }
 .home-night{

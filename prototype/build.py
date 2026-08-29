@@ -23,14 +23,17 @@ for f in sorted((root / "assets").iterdir()):
     js = js.replace(ref, uri)
     css = css.replace(ref, uri)
 
-fonts = ('<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
-         '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?'
-         'family=Noto+Sans+SC:wght@300;400;500&family=Noto+Serif+SC:wght@300;400;500'
-         '&family=Nunito:wght@400;600&family=Schoolbell&display=swap">')
+fonts = ('<link rel="preconnect" href="https://fonts.googleapis.com">'
+         '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
+         '<link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/font-awesome/6.5.0/css/all.min.css">'
+         '<link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/normalize/8.0.1/normalize.min.css">'
+         '<link rel="stylesheet" href="https://fonts.googleapis.cn/css2?family=Noto+Sans+SC:wght@300;400;500&family=Noto+Serif+SC:wght@300;400;500&family=Nunito:wght@400;600&family=Schoolbell&display=swap" crossorigin>')
 
 out = (root / "dist"); out.mkdir(exist_ok=True)
-artifact = ("<title>Puppyland</title>\n" + fonts + "\n<style>\n" + css + "\n</style>\n"
-            + body.strip() + "\n<script>\n" + js + "\n</script>\n")
+# 注意：必须包含 <meta charset="utf-8">，否则部署服务器（C locale）浏览器会乱码
+artifact = ("<!doctype html>\n<html lang=\"zh-CN\">\n<head>\n<meta charset=\"utf-8\">\n"
+            "<title>Puppyland</title>\n" + fonts + "\n<style>\n" + css + "\n</style>\n</head>\n<body>\n"
+            + body.strip() + "\n<script>\n" + js + "\n</script>\n</body>\n</html>\n")
 (out / "index.html").write_text(artifact, encoding="utf-8")
 
 standalone = ("<!doctype html>\n<html lang=\"zh-CN\">\n<head>\n"
