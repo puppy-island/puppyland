@@ -1,0 +1,21 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY prototype/ ./prototype/
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nodejs npm \
+    && npm install -g html-minifier \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build static files
+RUN python prototype/build.py
+
+WORKDIR /app/prototype/dist
+
+# Replace the default API URL with the Docker backend URL at container start
+CMD ["sh", "-c", "\
+sed -i 's|http://localhost:8001/api/v1|$$PUPPYLAND_API/api/v1|g' index.html && \
+python -m http.server 4321"]

@@ -1,0 +1,41 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: puppyisland-backend
+    ports:
+      - "8001:8001"
+    environment:
+      - PORT=8001
+      - HOST=0.0.0.0
+      - model=${model}
+      - base_url=${base_url}
+      - api_key=${api_key}
+      - ARK_API_KEY=${ARK_API_KEY}
+      - ARK_BASE_URL=${ARK_BASE_URL}
+      - TENCENT_SECRET_ID=${TENCENT_SECRET_ID}
+      - TENCENT_SECRET_KEY=${TENCENT_SECRET_KEY}
+      - ASR_APP_ID=${ASR_APP_ID}
+    volumes:
+      # 持久化上传的图片（backend_app/uploads）
+      - ./backend_app/uploads:/app/backend_app/uploads
+      # 持久化 SQLite 数据库（容器内 /app/data，命名卷，避免文件缺失被建为目录）
+      - puppy-db:/app/data
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: puppyisland-frontend
+    ports:
+      - "4321:4321"
+    environment:
+      - PUPPYLAND_API=http://localhost:8001/api/v1
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  puppy-db:

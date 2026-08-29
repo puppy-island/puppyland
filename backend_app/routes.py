@@ -3004,7 +3004,12 @@ def _remove_green_background(img_bytes: bytes) -> bytes:
 
 
 def _remove_beige_background(img_bytes: bytes) -> bytes:
-    """抠掉米色背景 RGB(251,232,207)，使用 LAB 颜色空间 chroma key"""
+    """抠掉米色背景 RGB(251,232,207)，使用 LAB 颜色空间 chroma key
+
+    图片正中央 150x150 像素始终落在狗狗身体范围内（三视图构图居中生成），
+    这一区域强制保留不透明，防止奶油色皮毛/高光等与背景色相近时被误判
+    为背景而在狗狗身体内部抠出空洞。
+    """
     try:
         import numpy as np
         from PIL import Image
@@ -3013,9 +3018,12 @@ def _remove_beige_background(img_bytes: bytes) -> bytes:
         TARGET_R, TARGET_G, TARGET_B = 251.0, 232.0, 207.0
         # 容差（AI生成的背景会有轻微偏差）
         TOLERANCE = 45.0
+        # 中央保护区域边长（像素）：该范围始终在狗狗轮廓内，禁止被抠除
+        PROTECT_SIZE = 150
 
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         arr = np.array(img, dtype=np.float32)
+        h, w = arr.shape[0], arr.shape[1]
 
         # 计算每个像素到目标背景色的欧氏距离
         dist = np.sqrt(
@@ -3032,6 +3040,14 @@ def _remove_beige_background(img_bytes: bytes) -> bytes:
         for _ in range(2):
             mask = mask | np.roll(mask, 1, axis=0) | np.roll(mask, -1, axis=0)
             mask = mask | np.roll(mask, 1, axis=1) | np.roll(mask, -1, axis=1)
+
+        # 中央保护区域：图片正中 150x150 像素落在狗狗身体内，膨胀后
+        # 再强制清除该区域的背景标记，确保不会被误抠透明
+        half = PROTECT_SIZE // 2
+        cy, cx = h // 2, w // 2
+        y0, y1 = max(0, cy - half), min(h, cy + (PROTECT_SIZE - half))
+        x0, x1 = max(0, cx - half), min(w, cx + (PROTECT_SIZE - half))
+        mask[y0:y1, x0:x1] = False
 
         # 转 RGBA
         rgba_arr = np.zeros((img.size[1], img.size[0], 4), dtype=np.uint8)

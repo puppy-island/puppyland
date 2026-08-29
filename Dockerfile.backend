@@ -1,0 +1,16 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 后端代码在 backend_app/ 包内，需以包形式导入（内部使用 `from backend_app.xxx import ...`）
+COPY backend_app/ ./backend_app/
+COPY .env .
+
+# 让 backend_app 成为可导入的顶层包
+ENV PYTHONPATH=/app
+EXPOSE 8001
+
+CMD ["uvicorn", "backend_app.main:app", "--host", "0.0.0.0", "--port", "8001"]
