@@ -10,6 +10,7 @@ from backend_app.schemas import (
     FullPetProfileResponse,
     PetEmotionalProfileCreate, PetEmotionalProfileResponse,
     ChatMessageCreate, ChatMessageResponse, ChatRequest,
+    GenerateBeatRequest,
     PetStateUpdate, PetStateResponse, MoveCommand, AnimationCommand,
     CustomAnimationCreate, CustomAnimationUpdate, CustomAnimationResponse,
     SceneRecordResponse, SceneRecordCreate,
@@ -950,6 +951,163 @@ def get_chat_history(pet_id: int, limit: int = Query(50, ge=1, le=100)):
         messages.reverse()
         return messages
 
+@router.post("/pets/{pet_id}/generate-beat", tags=["AI"])
+def generate_beat(pet_id: int, request: GenerateBeatRequest = None):
+    """
+    AI 根据宠物档案和记忆生成个性化剧情片段
+    返回：环境描写、动作、对白、推进语、姿态
+    """
+    prev_env = request.previous_beat if request else None
+
+    NIGHT_WORDS = ['暗', '夜', '灯', '黑', '黄昏', '傍晚', '暮']
+    DAY_WORDS = ['阳光', '天亮', '白天', '午后', '早晨', '晨']
+
+    def is_env_consistent(env):
+        if not prev_env:
+            # 没有前一幕可比对时，直接采信 LLM 自己生成的环境描写
+            return True
+        has_night = any(c in prev_env for c in NIGHT_WORDS)
+        has_day = any(c in prev_env for c in DAY_WORDS)
+        if has_night and not any(c in env for c in NIGHT_WORDS):
+            return False
+        if has_day and not any(c in env for c in DAY_WORDS):
+            return False
+        return True
+
+    def generate_consistent_env(prev_env_text):
+        if not prev_env_text:
+            return "房间里安静而温暖，TA安静地趴在主人脚边。"
+        is_night = any(c in prev_env_text for c in NIGHT_WORDS)
+        is_day = any(c in prev_env_text for c in DAY_WORDS)
+        if is_night:
+            return "房间里只剩下一盏灯，暖黄的光洒在地板上，TA安静地趴在主人脚边。"
+        elif is_day:
+            return "阳光透过窗户洒进来，TA在光影里安静地趴着。"
+        return prev_env_text
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM pets WHERE id = ?", (pet_id,))
+        pet = dict_from_row(cursor.fetchone())
+        if not pet:
+            raise HTTPException(status_code=404, detail="Pet not found")
+
+        cursor.execute("""
+            SELECT * FROM memories WHERE pet_id = ? ORDER BY
+                CASE memory_type
+                    WHEN 'first_sight' THEN 3
+                    WHEN 'wonderful_moment' THEN 2
+                    WHEN 'funny_eating' THEN 1
+                    ELSE 0
+                END DESC,
+                created_at DESC LIMIT 3
+        """, (pet_id,))
+        raw_memories = [dict_from_row(row) for row in cursor.fetchall()]
+
+        SENSITIVE = ['走了', '离开', '去世', '最后', '生病', '治疗', '安乐', '遗憾', '对不起', '后悔', '骨灰', '天堂', '彩虹桥']
+        safe_memories = [m for m in raw_memories if not any(p in m.get('content', '') for p in SENSITIVE)]
+
+        pet_name = pet.get('name', 'TA')
+        breed = pet.get('breed', '不明')
+        personality = pet.get('personality', '温柔忠诚')
+        likes = pet.get('likes', '陪伴主人')
+        fears = pet.get('fears', '离开主人')
+
+        memory_context = ""
+        if safe_memories:
+            mem_type_map = {
+                'first_sight': '第一次见面',
+                'funny_eating': '吃饭习惯',
+                'departure_reaction': '出门反应',
+                'protection': '保护主人',
+                'protected_by_owner': '被保护',
+                'wonderful_moment': '温暖时刻'
+            }
+            memory_lines = []
+            for m in safe_memories[:3]:
+                mem_label = mem_type_map.get(m.get('memory_type', ''), '记忆')
+                memory_lines.append("- " + mem_label + "：" + m.get('content', '')[:60])
+            memory_context = "\n".join(memory_lines)
+
+        prompt = """【角色】你是""" + pet_name + """，一只可爱的小狗，在主人的「记忆家园」里。现在要生成一段陪伴主人的剧情片段。
+
+【宠物档案】
+- 名字：""" + pet_name + """
+- 品种：""" + breed + """
+- 性格：""" + personality + """
+- 喜欢：""" + likes + """
+- 害怕：""" + fears + """
+
+【记忆】（主人和你真实发生过的事）
+""" + (memory_context if memory_context else "- 暂无具体记忆，但主人一直想念你") + """
+
+【要求】
+生成一个剧情片段，包含：
+1. env（环境描写，15字以内，简短有画面感）
+2. act（角色动作，20字以内）
+3. say（对白，10-20字，温暖陪伴风格）
+4. push（用第二人称"你"向主人发出的推进语/邀请语，10字以内，不要编造主人的名字）
+5. pose（姿态：idle/approach/happy/run/down/sleep）
+
+严格JSON格式返回：
+{"env":"...","act":"...","say":"...","push":"...","pose":"..."}
+
+规则：
+- 只用第一人称"我"，动作要像狗狗
+- 对白温暖简短，不说"我记得以前"
+- push 里只能用"你"称呼主人，绝对不要自己编造一个人名
+- 剧情要贴合上面的品种/性格/喜欢/害怕，不要写成千篇一律的通用文案
+- 如果 prev_env 有夜晚/灯光元素，env 也要是夜晚氛围
+- 如果 prev_env 有阳光元素，env 也要是白天氛围"""
+
+        try:
+            from openai import OpenAI
+            from dotenv import load_dotenv
+            load_dotenv(override=True)
+
+            client = OpenAI(
+                api_key=os.getenv("api_key"),
+                base_url=os.getenv("base_url")
+            )
+
+            response = client.chat.completions.create(
+                model=os.getenv("model", "deepseek-v4-flash"),
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.8,
+                max_tokens=200
+            )
+
+            import json, re
+            raw = response.choices[0].message.content.strip()
+
+            match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
+            if match:
+                json_str = match.group(1)
+            else:
+                json_str = raw
+
+            beat = json.loads(json_str)
+
+            env = beat.get("env", "")
+            if not is_env_consistent(env):
+                beat["env"] = generate_consistent_env(prev_env or "")
+
+            allowed_pose = {"idle", "approach", "happy", "run", "down", "sleep"}
+            if beat.get("pose") not in allowed_pose:
+                beat["pose"] = "idle"
+
+            return beat
+
+        except Exception as e:
+            import random
+            fallback_beats = [
+                {"env": "房间里安静而温暖，TA安静地趴在主人脚边。", "act": pet_name + "轻轻摇着尾巴，耳朵微微动了一下。", "say": "我在这里陪你。", "push": "和" + pet_name + "安静地待着。", "pose": "idle"},
+                {"env": "阳光透过窗户洒进来，TA在光影里安静地趴着。", "act": pet_name + "抬起头，看着主人，尾巴慢慢扫过地面。", "say": "你回来了。", "push": "和" + pet_name + "一起晒太阳。", "pose": "idle"},
+                {"env": "房间里只剩下一盏灯，暖黄的光洒在地板上。", "act": pet_name + "蜷在你脚边，身体暖暖的。", "say": "今晚也在。", "push": "和" + pet_name + "一起入睡。", "pose": "sleep"},
+            ]
+            return random.choice(fallback_beats)
+
 # ============ Pet State Routes (2D Animation) ============
 
 @router.post("/pets/{pet_id}/state", response_model=PetStateResponse, tags=["PetState"])
@@ -1703,3 +1861,98 @@ def get_asr_url(voice_id: str = Query(default="", description="语音ID")):
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return out
+
+
+@router.get("/extract-pet-info", tags=["ASR"])
+def extract_pet_info(text: str = Query(..., description="用户口述的原始文本")):
+    """
+    从用户口述文本中提取宠物信息（名字、品种、性格等）。
+    先用正则提取名字，再用 LLM 提取其他信息。
+
+    设计：支持增量更新——如果 pet_name 已存在，只在未提取到时才覆盖。
+    """
+    import re, os
+    from openai import OpenAI
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+
+    # ── Step 1: 正则提取名字 ───────────────────────────────────────
+    # 常见模式：我家叫 X / X 是一只 / 它叫 X / 名字是 X / 叫 X（狗名/小名）
+    NAME_PATTERNS = [
+        r'它叫([A-Za-z一-鿿]{1,8})',
+        r'她叫([A-Za-z一-鿿]{1,8})',
+        r'他叫([A-Za-z一-鿿]{1,8})',
+        r'名字[是为是] ?([A-Za-z一-鿿]{1,8})',
+        r'叫([A-Za-z一-鿿]{1,8})(?:这只|这只狗|的小狗|是一只|它)?',
+        r'我家(?:小狗|狗|TA|它)叫([A-Za-z一-鿿]{1,8})',
+        r'^([A-Za-z一-鿿]{1,8})(?:是|这只|的小狗)',
+        r'(?:小狗|狗|TA|它)(?:叫|名字是) ?([A-Za-z一-鿿]{1,8})',
+    ]
+
+    extracted_name = None
+    for pat in NAME_PATTERNS:
+        m = re.search(pat, text)
+        if m:
+            candidate = m.group(1).strip()
+            # 过滤掉明显不是名字的词
+            if candidate and len(candidate) >= 2 and candidate not in ('一只', '这只', '的小狗', '一只狗', '什么', '名字'):
+                extracted_name = candidate
+                break
+
+    # ── Step 2: LLM 提取更多信息 ──────────────────────────────────
+    breed = None
+    color = None
+    personality_traits = []
+    key_objects = []
+    habits = []
+
+    try:
+        client = OpenAI(
+            api_key=os.getenv("api_key"),
+            base_url=os.getenv("base_url")
+        )
+        response = client.chat.completions.create(
+            model=os.getenv("model", "Qwen/Qwen3.6-27B"),
+            messages=[{
+                "role": "user",
+                "content": f"""分析以下关于宠物（很可能是狗狗）的描述文本，提取信息。
+
+描述：{text}
+
+请以JSON格式返回：
+{{
+    "breed": "狗的品种，如柯基/金毛/泰迪/中华田园犬/拉布拉多/哈士奇/柴犬/法斗/吉娃娃/马尔济斯/边牧，或 null（未提及）",
+    "color": "主要毛色，如白色/黄色/黑色/棕色/灰色/奶油色/花色，或 null",
+    "personality_traits": ["性格关键词列表，如胆小/黏人/贪吃/活泼/安静/爱叫/聪明/调皮/忠诚/倔强，最多3个"],
+    "key_objects": ["描述中提到的宠物用品/玩具，如球/骨头/玩具/毯子/窝，最多2个"],
+    "habits": ["描述中提到的宠物习惯，如转圈/扑人/等门/晒太阳/护食，最多2个"]
+}}
+
+只返回JSON。"""
+            }],
+            temperature=0.2
+        )
+
+        import json as _json
+        result_text = response.choices[0].message.content
+        json_match = re.search(r'\{[^}]+\}', result_text, re.DOTALL)
+        if json_match:
+            result = _json.loads(json_match.group())
+            breed = result.get("breed")
+            color = result.get("color")
+            personality_traits = result.get("personality_traits") or []
+            key_objects = result.get("key_objects") or []
+            habits = result.get("habits") or []
+
+    except Exception as e:
+        pass  # 网络错误时降级，只返回正则提取的名字
+
+    return {
+        "extracted_name": extracted_name,
+        "breed": breed,
+        "color": color,
+        "personality_traits": personality_traits,
+        "key_objects": key_objects,
+        "habits": habits,
+        "raw_text": text
+    }
