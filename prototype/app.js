@@ -1016,8 +1016,13 @@
       if (S.scene !== 'weave') return;
       w.classList.add('is-entering');
     }, 4850);
+    // 推镜还在走时就叠上特写，交叉淡入；特写和主页是同一张图，之后切场无缝
+    setTimeout(function () {
+      if (S.scene !== 'weave') return;
+      w.classList.add('is-closeup');
+    }, 6100);
     syncHomeConfig();
-    setTimeout(function () { if (S.scene === 'weave') goto('home'); }, 7000);
+    setTimeout(function () { if (S.scene === 'weave') goto('home'); }, 7600);
   }
 
   /* ────────────────────────────────────────────────────────────────────

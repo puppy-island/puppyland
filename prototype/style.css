@@ -298,7 +298,7 @@ body{
 .journey-world.is-swimming{ background:#A7C7F0; }
 .journey-world.is-swimming::before{ opacity:.12; }
 .journey-world.is-swimming::after{ opacity:1; }
-.journey-world.is-rainbow{ background:#E9EAD9 url("assets/rainbow-bridge.png") center / cover no-repeat; }
+.journey-world.is-rainbow{ background:#E9EAD9 url("assets/rainbow-bridge-soft.png") center / cover no-repeat; }
 .journey-world.is-rainbow::before{ opacity:0; }
 .journey-world.is-rainbow::after{ opacity:0; }
 .journey-world.is-rainbow .journey-sky,.journey-world.is-rainbow .journey-mountains,.journey-world.is-rainbow .journey-ground,.journey-world.is-rainbow .journey-road{ opacity:0; }
@@ -315,12 +315,15 @@ body{
 .journey-bridge::before{ content:""; position:absolute; inset:0; border-top:8px solid #F7D9A6; border-radius:50% 50% 0 0; transform:rotate(-8deg); box-shadow:0 -18px 0 -10px #E6A5B6,0 -32px 0 -21px #9DAFE8; }
 .journey-world.is-rainbow .journey-bridge{ opacity:0; transform:none; }
 .journey-world.is-rainbow .journey-pet{ opacity:0; visibility:hidden; }
-.journey-group-video{ position:absolute; inset:0; z-index:6; width:100%; height:100%; object-fit:cover; opacity:0; pointer-events:none; transition:opacity .8s ease; }
+/* 群狗整体下移，避开上方文案；视频上下边缘本就是同一片米色，用 box-shadow 把移出后露出的部分补齐，随视频一起淡入 */
+.journey-group-video{ position:absolute; inset:0; z-index:6; width:100%; height:100%; object-fit:cover; opacity:0; pointer-events:none; transition:opacity .8s ease; transform:translateY(21%); box-shadow:0 0 0 500px #ECCDAE; }
 .journey-world.is-group-crossing .journey-group-video{ opacity:1; }
 .journey-particles{ position:absolute; inset:0; opacity:.55; background-image:radial-gradient(circle,rgba(255,248,204,.9) 0 2px,transparent 3px); background-size:82px 96px; animation:floatParticles 8s linear infinite; }
 @keyframes floatParticles{ to{ transform:translateY(-96px); } }
 .journey-pet{ left:35%; bottom:35%; width:106px; margin-left:-53px; z-index:5; opacity:0; transition:filter 1.4s,opacity 1.4s,left 1.2s; }
 .journey-pet .pet{ filter:blur(calc((1 - var(--detail)) * 5px)) drop-shadow(0 10px 12px rgba(45,73,112,.25)); }
+/* 兜底：记忆旅程全程不出现清晰的小狗写实图，一律走 CSS 毛球 */
+.journey-world .journey-pet .pet{ opacity:0 !important; }
 .journey-world:not(.is-swimming) .journey-pet{ opacity:0; filter:blur(18px); }
 .journey-world.is-running .journey-pet{ animation:journeyRun .75s ease-in-out infinite; }
 @keyframes journeyRun{ 0%,100%{ transform:translateY(0) } 50%{ transform:translateY(-5px) } }
@@ -374,14 +377,36 @@ body{
 .journey-world[data-state="swimming"][data-scene-index="0"] .journey-pet .pet{ opacity:0; }
 .journey-world[data-state="swimming"][data-scene-index="0"] .journey-pet::before{
   content:""; position:absolute; left:50%; top:50%; width:66px; height:58px; transform:translate(-50%,-50%);
-  border-radius:52% 48% 46% 54%; background:rgba(255,252,243,.9);
-  box-shadow:-28px 17px 0 -13px rgba(255,252,243,.82),29px 18px 0 -13px rgba(255,252,243,.82),-39px 1px 0 -24px rgba(255,252,243,.78),0 0 28px 12px rgba(255,246,213,.82);
-  filter:blur(9px); animation:journeyRun .9s ease-in-out infinite;
+  border-radius:52% 48% 46% 54%; background:rgba(255,253,246,.98);
+  box-shadow:-28px 17px 0 -13px rgba(255,253,246,.9),29px 18px 0 -13px rgba(255,253,246,.9),-39px 1px 0 -24px rgba(255,253,246,.85),0 0 18px 5px rgba(255,246,213,.5);
+  filter:blur(13px); animation:journeyRun .9s ease-in-out infinite;
 }
-.journey-world[data-scene-index="1"]{ background:#A7C7F0 !important; }
-.journey-world[data-scene-index="1"]::after{ opacity:1 !important; background:#A7C7F0 url("assets/swimming.png") center / cover no-repeat; filter:blur(4px) saturate(.82); transform:scale(1.02); }
-.journey-world[data-scene-index="1"] .journey-pet{ opacity:0 !important; visibility:hidden; }
-.journey-world[data-scene-index="2"]{ background:#E9EAD9 url("assets/rainbow-bridge.png") center / cover no-repeat !important; }
+/* scene 1「一些画面开始浮现」：背景保持清晰，狗狗单独重度模糊 */
+/* 背景层——不加任何 filter，水波纹画在这张图里，保留原图清晰度 */
+.journey-world[data-scene-index="1"]{ background:linear-gradient(180deg,#E2E3EF 0%,#D9DCEE 30%,#CBD2EA 50%,#B0BFE6 65%,#8FA9E1 78%,#6D8FDB 90%,#4A78D3 100%) !important; }
+.journey-world[data-scene-index="1"]::before{ opacity:0 !important; }
+.journey-world[data-scene-index="1"]::after{ opacity:1 !important; background:url("assets/swimming-bg.jpg") center / cover no-repeat; filter:none; transform:none; }
+/* 狗狗层——复用上一帧的 CSS 毛球，调成水面色调，糊得比上一帧更重 */
+.journey-world[data-scene-index="1"] .journey-pet{ opacity:1 !important; visibility:visible; left:56%; top:calc(71% - 60px); bottom:auto; width:140px; height:120px; margin-left:-70px; filter:none; }
+.journey-world[data-scene-index="1"] .journey-pet .pet{ opacity:0; }
+.journey-world[data-scene-index="1"] .journey-pet::before{
+  content:""; position:absolute; left:50%; top:50%; width:68px; height:62px;
+  border-radius:50% 50% 48% 52%; background:rgba(255,255,255,.96);
+  box-shadow:-33px 10px 0 -5px rgba(255,255,255,.93),-60px 13px 0 -18px rgba(255,255,255,.88);
+  filter:blur(8px); animation:journeyPetFloat 4.5s ease-in-out infinite;
+}
+/* 光环——跟狗狗一起糊 */
+.journey-world[data-scene-index="1"] .journey-pet::after{
+  content:""; position:absolute; left:50%; top:calc(50% - 36px); width:40px; height:12px; margin-left:-11px;
+  border:3px solid rgba(244,219,120,.95); border-radius:50%;
+  filter:blur(4px); animation:journeyHaloFloat 4.5s ease-in-out infinite;
+}
+@keyframes journeyPetFloat{ 0%,100%{ transform:translate(-50%,-50%) } 50%{ transform:translate(-50%,calc(-50% - 5px)) } }
+@keyframes journeyHaloFloat{ 0%,100%{ transform:translateY(0) } 50%{ transform:translateY(-5px) } }
+/* 水波纹——独立清晰图层，不跟随狗狗模糊；避开狗狗本体，只在两侧 */
+.journey-ripples{ position:absolute; left:0; right:0; bottom:24%; height:9%; z-index:6; opacity:0; pointer-events:none; transition:opacity 1.4s var(--ease); background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1000 100'%3E%3Cg fill='none' stroke='%232B4E9E' stroke-width='5' stroke-linecap='round' opacity='.72'%3E%3Cpath d='M86 14 q11 -8 22 0 t22 0 t22 0 t16 0'/%3E%3Cpath d='M187 46 q11 -8 22 0 t22 0 t25 0'/%3E%3Cpath d='M328 62 q11 -8 22 0 t22 0 t22 0 t12 0'/%3E%3Cpath d='M351 92 q11 -8 22 0 t22 0 t22 0 t20 0'/%3E%3Cpath d='M668 56 q11 -8 22 0 t22 0 t22 0 t22 0 t20 0'/%3E%3C/g%3E%3C/svg%3E") center / 100% auto no-repeat; }
+.journey-world[data-scene-index="1"] .journey-ripples{ opacity:1; }
+.journey-world[data-scene-index="2"]{ background:#E9EAD9 url("assets/rainbow-bridge-soft.png") center / cover no-repeat !important; }
 .journey-world[data-scene-index="2"]::before,.journey-world[data-scene-index="2"]::after{ opacity:0 !important; }
 .journey-world[data-scene-index="2"] .journey-sky,.journey-world[data-scene-index="2"] .journey-mountains,.journey-world[data-scene-index="2"] .journey-ground,.journey-world[data-scene-index="2"] .journey-road,.journey-world[data-scene-index="2"] .journey-pet{ opacity:0 !important; visibility:hidden; }
 .journey-voice{ width:68px; height:68px; margin:10px auto 0; border:0; border-radius:50%; color:#705A49; background:#E7D8BF; box-shadow:0 6px 16px -9px rgba(69,55,43,.55),inset 0 0 0 1px rgba(255,255,255,.7); display:grid; place-items:center; cursor:pointer; transition:transform .25s var(--ease),background .25s; }
@@ -592,7 +617,17 @@ body{
 }
 .neighborhood-map>img{ width:100%; height:100%; display:block; object-fit:cover; }
 .neighborhood-scene.is-settled .neighborhood-map{ opacity:1; transform:scale(1); }
-.neighborhood-scene.is-entering .neighborhood-map{ opacity:1; transform:translateY(-11%) scale(5.15); filter:saturate(.92) brightness(1.05); }
+.neighborhood-scene.is-entering .neighborhood-map{ opacity:1; transform:translateY(-11%) scale(2.4); filter:saturate(.92) brightness(1.05); }
+/* 推镜末尾交叉淡入房子特写。用的就是主页那张 home-v2.png，渲染方式与 .home-art
+   完全一致，所以切到 home 场景时画面重合，房子不跳、不换姿势。
+   社区图只有 1086x1448 且压缩很重，推镜到 2.4 倍已是它的分辨率上限，
+   再往里推必须靠这一层，不能靠放大原图。 */
+.neighborhood-closeup{
+  position:absolute; inset:0; z-index:3; opacity:0; pointer-events:none;
+  background:#EBD7BE url("assets/home-v2.png") center / 100% auto no-repeat;
+  transition:opacity 1s var(--ease);
+}
+.neighborhood-scene.is-closeup .neighborhood-closeup{ opacity:1; }
 .neighborhood-wash{
   position:absolute; inset:0; opacity:0; pointer-events:none;
   background:radial-gradient(circle at 50% 61%, rgba(255,244,214,0) 0 9%, rgba(238,217,191,.22) 25%, rgba(238,217,191,.62) 70%);
