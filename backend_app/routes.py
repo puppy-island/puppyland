@@ -15,10 +15,33 @@ from backend_app.schemas import (
     CustomAnimationCreate, CustomAnimationUpdate, CustomAnimationResponse,
     SceneRecordResponse, SceneRecordCreate,
     JourneyRecordResponse, JourneyRecordCreate,
-    NarrationRecordResponse, NarrationRecordCreate
+    NarrationRecordResponse, NarrationRecordCreate,
+    RelationshipMaterialResponse, InferredTraitResponse, PuppylandSharedResponse,
+    DailyLetterResponse, GenerateLetterRequest
 )
 
 router = APIRouter()
+
+# ============ Helper Functions ============
+
+def parse_llm_json_response(result_text: str) -> dict:
+    """解析LLM返回的JSON响应，处理各种格式问题"""
+    import json
+    import re
+    try:
+        return json.loads(result_text)
+    except json.JSONDecodeError:
+        pass
+    # 尝试提取JSON块（处理LLM返回的可能包含markdown代码块的情况）
+    json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', result_text, re.DOTALL)
+    if json_match:
+        return json.loads(json_match.group(1))
+    # 最后尝试查找第一个{到最后一个}之间的内容
+    first_brace = result_text.find('{')
+    last_brace = result_text.rfind('}')
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        return json.loads(result_text[first_brace:last_brace+1])
+    raise ValueError(f"无法解析JSON: {result_text[:200]}")
 
 # ============ Pet Routes ============
 
@@ -435,20 +458,14 @@ def generate_home_item(pet_id: int, memory_id: int):
                 temperature=0.3
             )
 
-            import json
-            import re
             result_text = response.choices[0].message.content
-            json_match = re.search(r'\{[^}]+\}', result_text, re.DOTALL)
-            if json_match:
-                result = json.loads(json_match.group())
-                suggested_item = {
-                    "item_type": result.get("item_type", item_type),
-                    "item_name": result.get("item_name", f"{pet.get('name', 'ta')}的纪念物"),
-                    "description": result.get("description", f"来自记忆：{memory.get('title', memory_type)}"),
-                    "growth_level": 1
-                }
-            else:
-                raise ValueError("JSON解析失败")
+            result = parse_llm_json_response(result_text)
+            suggested_item = {
+                "item_type": result.get("item_type", item_type),
+                "item_name": result.get("item_name", f"{pet.get('name', 'ta')}的纪念物"),
+                "description": result.get("description", f"来自记忆：{memory.get('title', memory_type)}"),
+                "growth_level": 1
+            }
 
         except Exception as e:
             # 回退到基于记忆类型的默认物品
@@ -612,13 +629,8 @@ async def identify_dog(
 
         result_text = response.choices[0].message.content
         # 尝试解析JSON
-        import json
-        import re
-
-        # 提取JSON
-        json_match = re.search(r'\{[^}]+\}', result_text, re.DOTALL)
-        if json_match:
-            result = json.loads(json_match.group())
+        try:
+            result = parse_llm_json_response(result_text)
             return DogIdentificationResponse(
                 breed=result.get("breed"),
                 breed_confidence=result.get("breed_confidence"),
@@ -627,11 +639,11 @@ async def identify_dog(
                 description=result.get("description"),
                 success=True
             )
-
-        return DogIdentificationResponse(
-            success=False,
-            message="无法解析识别结果"
-        )
+        except Exception:
+            return DogIdentificationResponse(
+                success=False,
+                message="无法解析识别结果"
+            )
 
     except Exception as e:
         return DogIdentificationResponse(
@@ -784,6 +796,32 @@ def send_message_to_pet(pet_id: int, chat_request: ChatRequest):
         likes = pet.get('likes', '陪伴主人')
         fears = pet.get('fears', '离开主人')
 
+        # 查询关系素材（从数据库获取）
+        cursor.execute("""
+            SELECT material_type, content FROM relationship_materials
+            WHERE pet_id = ? AND is_active = 1
+            ORDER BY confidence DESC, created_at DESC
+        """, (pet_id,))
+        rel_materials_rows = cursor.fetchall()
+        fixed_actions = []
+        owner_phrases = []
+        habits = []
+        for row in rel_materials_rows:
+            if row[0] == 'fixed_action':
+                fixed_actions.append(row[1])
+            elif row[0] == 'owner_phrase':
+                owner_phrases.append(row[1])
+            elif row[0] == 'habit':
+                habits.append(row[1])
+
+        # 查询推断的性格特征
+        cursor.execute("""
+            SELECT trait FROM inferred_traits
+            WHERE pet_id = ? ORDER BY confidence DESC, created_at DESC
+        """, (pet_id,))
+        inferred_traits_rows = cursor.fetchall()
+        inferred_traits = [row[0] for row in inferred_traits_rows]
+
         # 从记忆中提取关键物件和习惯
         key_objects = []
         key_habits = []
@@ -830,13 +868,39 @@ def send_message_to_pet(pet_id: int, chat_request: ChatRequest):
                 memory_lines.append(f"- {mem_type}：{m.get('content', '')[:60]}")
             memory_context = "\n".join(memory_lines)
 
+        # 构建关系素材上下文
+        traits_context = ""
+        if inferred_traits:
+            traits_context = "、".join(inferred_traits[:5])
+
+        fixed_actions_context = ""
+        if fixed_actions:
+            fixed_actions_context = "\n".join([f"- {a}" for a in fixed_actions[:3]])
+
+        owner_phrases_context = ""
+        if owner_phrases:
+            owner_phrases_context = "\n".join([f"- 主人常说：\"{p}\"" for p in owner_phrases[:2]])
+
+        habits_context = ""
+        if habits:
+            habits_context = "\n".join([f"- {h}" for h in habits[:3]])
+
         system_prompt = f"""【角色】你是{pet_name}，一只可爱的小狗。现在在主人的「记忆家园」里陪伴主人。
 
 【基本信息】
 - 品种：{breed}
-- 性格：{personality}
+- 性格标签：{traits_context if traits_context else personality}
 - 喜欢：{likes}
 - 害怕：{fears}
+
+【关系素材 - 固定行为链】（这些是这只狗的真实行为特征，对话时要体现）
+{fixed_actions_context if fixed_actions_context else "- 暂无固定行为记录"}
+
+【关系素材 - 主人用语】（主人经常说的话，对话时可以自然引用）
+{owner_phrases_context if owner_phrases_context else "- 暂无记录"}
+
+【关系素材 - 习惯】（这只狗的习惯性行为）
+{habits_context if habits_context else "- 暂无习惯记录"}
 
 【这个家的记忆】（这些是主人和你真实发生过的事，用于约束你的行为和语气）
 {memory_context if memory_context else "- 暂无具体记忆，但主人一直想念你"}
@@ -849,6 +913,7 @@ def send_message_to_pet(pet_id: int, chat_request: ChatRequest):
 5. 新故事是此刻的想象陪伴，不是历史事实
 6. 如果主人表达痛苦，给予温暖陪伴，不追问
 7. 不要用"汪汪叫"这种描述，可以说"尾巴摇了两下"这种更自然的
+8. 对话要贴合上述【关系素材】描述的行为特征，如果狗是"嘴硬"类型，回复要体现口是心非
 
 【对话风格示例】
 主人：今天累死了
@@ -1014,6 +1079,45 @@ def generate_beat(pet_id: int, request: GenerateBeatRequest = None):
         likes = pet.get('likes', '陪伴主人')
         fears = pet.get('fears', '离开主人')
 
+        # 查询关系素材
+        cursor.execute("""
+            SELECT material_type, content FROM relationship_materials
+            WHERE pet_id = ? AND is_active = 1
+            ORDER BY confidence DESC, created_at DESC
+        """, (pet_id,))
+        rel_materials_rows = cursor.fetchall()
+        fixed_actions = []
+        owner_phrases = []
+        habits = []
+        for row in rel_materials_rows:
+            if row[0] == 'fixed_action':
+                fixed_actions.append(row[1])
+            elif row[0] == 'owner_phrase':
+                owner_phrases.append(row[1])
+            elif row[0] == 'habit':
+                habits.append(row[1])
+
+        # 查询推断的性格特征
+        cursor.execute("""
+            SELECT trait FROM inferred_traits
+            WHERE pet_id = ? ORDER BY confidence DESC, created_at DESC
+        """, (pet_id,))
+        inferred_traits_rows = cursor.fetchall()
+        inferred_traits = [row[0] for row in inferred_traits_rows]
+
+        # 构建关系素材上下文
+        traits_context = ""
+        if inferred_traits:
+            traits_context = "、".join(inferred_traits[:5])
+
+        fixed_actions_context = ""
+        if fixed_actions:
+            fixed_actions_context = "\n".join([f"- {a}" for a in fixed_actions[:3]])
+
+        habits_context = ""
+        if habits:
+            habits_context = "\n".join([f"- {h}" for h in habits[:3]])
+
         memory_context = ""
         if safe_memories:
             mem_type_map = {
@@ -1035,9 +1139,15 @@ def generate_beat(pet_id: int, request: GenerateBeatRequest = None):
 【宠物档案】
 - 名字：""" + pet_name + """
 - 品种：""" + breed + """
-- 性格：""" + personality + """
+- 性格标签：""" + (traits_context if traits_context else personality) + """
 - 喜欢：""" + likes + """
 - 害怕：""" + fears + """
+
+【关系素材 - 固定行为链】（这些是这只狗的真实行为特征，剧情要体现）
+""" + (fixed_actions_context if fixed_actions_context else "- 暂无固定行为记录") + """
+
+【关系素材 - 习惯】
+""" + (habits_context if habits_context else "- 暂无习惯记录") + """
 
 【记忆】（主人和你真实发生过的事）
 """ + (memory_context if memory_context else "- 暂无具体记忆，但主人一直想念你") + """
@@ -1057,7 +1167,7 @@ def generate_beat(pet_id: int, request: GenerateBeatRequest = None):
 - 只用第一人称"我"，动作要像狗狗
 - 对白温暖简短，不说"我记得以前"
 - push 里只能用"你"称呼主人，绝对不要自己编造一个人名
-- 剧情要贴合上面的品种/性格/喜欢/害怕，不要写成千篇一律的通用文案
+- 剧情要贴合上面【关系素材】描述的行为特征，如果狗是"嘴硬"类型，要体现口是心非
 - 如果 prev_env 有夜晚/灯光元素，env 也要是夜晚氛围
 - 如果 prev_env 有阳光元素，env 也要是白天氛围"""
 
@@ -1629,23 +1739,17 @@ def generate_journey(pet_id: int):
                 temperature=0.7
             )
 
-            import json
-            import re
             result_text = response.choices[0].message.content
-            json_match = re.search(r'\{[^}]+\}', result_text, re.DOTALL)
-            if json_match:
-                result = json.loads(json_match.group())
-                based_on_memory_id = memories[0]["id"] if memories else None
-                cursor.execute("""
-                    INSERT INTO journey_records (pet_id, journey_type, title, content, based_on_memory_id, next_suggestion)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, (pet_id, result.get("journey_type", "continuation"), result.get("title", "新的旅程"),
-                      result.get("content", ""), based_on_memory_id, result.get("next_suggestion", "")))
-                journey_id = cursor.lastrowid
-                cursor.execute("SELECT * FROM journey_records WHERE id = ?", (journey_id,))
-                return dict_from_row(cursor.fetchone())
-            else:
-                raise ValueError("JSON解析失败")
+            result = parse_llm_json_response(result_text)
+            based_on_memory_id = memories[0]["id"] if memories else None
+            cursor.execute("""
+                INSERT INTO journey_records (pet_id, journey_type, title, content, based_on_memory_id, next_suggestion)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (pet_id, result.get("journey_type", "continuation"), result.get("title", "新的旅程"),
+                  result.get("content", ""), based_on_memory_id, result.get("next_suggestion", "")))
+            journey_id = cursor.lastrowid
+            cursor.execute("SELECT * FROM journey_records WHERE id = ?", (journey_id,))
+            return dict_from_row(cursor.fetchone())
 
         except Exception as e:
             # 降级处理
@@ -1697,7 +1801,14 @@ def process_narration(pet_id: int, narration: NarrationRecordCreate):
     "parsed_content": "完整描述（20字以上）",
     "generated_item_name": "生成的物品名称",
     "generated_item_type": "toy/food/photo/medal/heart/star/default",
-    "ai_response": "AI的温柔回应（20字以内）"
+    "ai_response": "AI的温柔回应（20字以内）",
+    "relationship_materials": {{
+        "fixed_actions": ["具体的行为链描述，如'等主人放包脱鞋后才慢吞吞过来'，最多2个"],
+        "owner_phrases": ["主人经常说的固定用语，如'想我就直说嘛'，最多2个"],
+        "habits": ["习惯性行为，如'一听到钥匙声就冲过来'，最多2个"]
+    }},
+    "inferred_traits": ["从行为推断的性格，如'嘴硬'/'贪吃'/'胆小'，最多2个"],
+    "provenance": "user_reported"
 }}
 
 只返回JSON。"""
@@ -1708,11 +1819,22 @@ def process_narration(pet_id: int, narration: NarrationRecordCreate):
             import json
             import re
             result_text = response.choices[0].message.content
-            json_match = re.search(r'\{[^}]+\}', result_text, re.DOTALL)
-            if json_match:
-                result = json.loads(json_match.group())
-            else:
-                raise ValueError("JSON解析失败")
+            # 尝试直接解析，如果失败则尝试提取JSON块
+            try:
+                result = json.loads(result_text)
+            except json.JSONDecodeError:
+                # 尝试提取JSON块（处理LLM返回的可能包含markdown代码块的情况）
+                json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', result_text, re.DOTALL)
+                if json_match:
+                    result = json.loads(json_match.group(1))
+                else:
+                    # 最后尝试查找第一个{到最后一个}之间的内容
+                    first_brace = result_text.find('{')
+                    last_brace = result_text.rfind('}')
+                    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                        result = json.loads(result_text[first_brace:last_brace+1])
+                    else:
+                        raise ValueError(f"无法解析JSON: {result_text[:200]}")
 
         except Exception as e:
             # 降级处理
@@ -1722,7 +1844,10 @@ def process_narration(pet_id: int, narration: NarrationRecordCreate):
                 "parsed_content": raw_text[:100] if len(raw_text) > 100 else raw_text,
                 "generated_item_name": f"{pet.get('name', 'ta')}的纪念",
                 "generated_item_type": "heart",
-                "ai_response": "汪~ 主人，记得呢"
+                "ai_response": "汪~ 主人，记得呢",
+                "relationship_materials": {"fixed_actions": [], "owner_phrases": [], "habits": []},
+                "inferred_traits": [],
+                "provenance": "user_reported"
             }
 
         # 保存口述记录
@@ -1734,6 +1859,38 @@ def process_narration(pet_id: int, narration: NarrationRecordCreate):
               result.get("parsed_content"), result.get("generated_item_name"),
               result.get("generated_item_type"), result.get("ai_response")))
         narration_id = cursor.lastrowid
+
+        # 存储关系素材
+        rel_materials = result.get("relationship_materials", {})
+        fixed_actions = rel_materials.get("fixed_actions", []) or []
+        owner_phrases = rel_materials.get("owner_phrases", []) or []
+        habits = rel_materials.get("habits", []) or []
+
+        for action in fixed_actions:
+            cursor.execute("""
+                INSERT INTO relationship_materials (pet_id, material_type, content, source_narration_id, provenance, confidence)
+                VALUES (?, 'fixed_action', ?, ?, 'user_reported', 1.0)
+            """, (pet_id, action, narration_id))
+
+        for phrase in owner_phrases:
+            cursor.execute("""
+                INSERT INTO relationship_materials (pet_id, material_type, content, source_narration_id, provenance, confidence)
+                VALUES (?, 'owner_phrase', ?, ?, 'user_reported', 1.0)
+            """, (pet_id, phrase, narration_id))
+
+        for habit in habits:
+            cursor.execute("""
+                INSERT INTO relationship_materials (pet_id, material_type, content, source_narration_id, provenance, confidence)
+                VALUES (?, 'habit', ?, ?, 'user_reported', 1.0)
+            """, (pet_id, habit, narration_id))
+
+        # 存储推断的性格特征
+        inferred = result.get("inferred_traits", []) or []
+        for trait in inferred:
+            cursor.execute("""
+                INSERT INTO inferred_traits (pet_id, trait, trait_category, source_memory_id, confidence)
+                VALUES (?, ?, 'personality', ?, 0.7)
+            """, (pet_id, trait, narration_id))
 
         cursor.execute("SELECT * FROM narration_records WHERE id = ?", (narration_id,))
         return dict_from_row(cursor.fetchone())
@@ -1783,7 +1940,14 @@ def auto_grow_from_narration(pet_id: int, narration_text: str = Query(..., descr
     "parsed_content": "完整描述（20字以上）",
     "generated_item_name": "生成的物品名称",
     "generated_item_type": "toy/food/photo/medal/heart/star/default",
-    "ai_response": "AI的温柔回应（20字以内）"
+    "ai_response": "AI的温柔回应（20字以内）",
+    "relationship_materials": {{
+        "fixed_actions": ["具体的行为链描述，如'等主人放包脱鞋后才慢吞吞过来'，最多2个"],
+        "owner_phrases": ["主人经常说的固定用语，如'想我就直说嘛'，最多2个"],
+        "habits": ["习惯性行为，如'一听到钥匙声就冲过来'，最多2个"]
+    }},
+    "inferred_traits": ["从行为推断的性格，如'嘴硬'/'贪吃'/'胆小'，最多2个"],
+    "provenance": "user_reported"
 }}
 
 只返回JSON。"""
@@ -1794,11 +1958,22 @@ def auto_grow_from_narration(pet_id: int, narration_text: str = Query(..., descr
             import json
             import re
             result_text = response.choices[0].message.content
-            json_match = re.search(r'\{[^}]+\}', result_text, re.DOTALL)
-            if json_match:
-                result = json.loads(json_match.group())
-            else:
-                raise ValueError("JSON解析失败")
+            # 尝试直接解析，如果失败则尝试提取JSON块
+            try:
+                result = json.loads(result_text)
+            except json.JSONDecodeError:
+                # 尝试提取JSON块（处理LLM返回的可能包含markdown代码块的情况）
+                json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', result_text, re.DOTALL)
+                if json_match:
+                    result = json.loads(json_match.group(1))
+                else:
+                    # 最后尝试查找第一个{到最后一个}之间的内容
+                    first_brace = result_text.find('{')
+                    last_brace = result_text.rfind('}')
+                    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                        result = json.loads(result_text[first_brace:last_brace+1])
+                    else:
+                        raise ValueError(f"无法解析JSON: {result_text[:200]}")
 
         except Exception as e:
             result = {
@@ -1807,14 +1982,18 @@ def auto_grow_from_narration(pet_id: int, narration_text: str = Query(..., descr
                 "parsed_content": narration_text[:100] if len(narration_text) > 100 else narration_text,
                 "generated_item_name": f"{pet.get('name', 'ta')}的纪念",
                 "generated_item_type": "heart",
-                "ai_response": "汪~ 主人，记得呢"
+                "ai_response": "汪~ 主人，记得呢",
+                "relationship_materials": {"fixed_actions": [], "owner_phrases": [], "habits": []},
+                "inferred_traits": [],
+                "provenance": "user_reported"
             }
 
         # 1. 创建记忆
         cursor.execute("""
-            INSERT INTO memories (pet_id, memory_type, title, content)
-            VALUES (?, ?, ?, ?)
-        """, (pet_id, result.get("parsed_memory_type"), result.get("parsed_title"), result.get("parsed_content")))
+            INSERT INTO memories (pet_id, memory_type, title, content, provenance, confidence)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (pet_id, result.get("parsed_memory_type"), result.get("parsed_title"),
+              result.get("parsed_content"), result.get("provenance", "user_reported"), 1.0))
         memory_id = cursor.lastrowid
         cursor.execute("SELECT * FROM memories WHERE id = ?", (memory_id,))
         memory = dict_from_row(cursor.fetchone())
@@ -1829,7 +2008,7 @@ def auto_grow_from_narration(pet_id: int, narration_text: str = Query(..., descr
         cursor.execute("SELECT * FROM virtual_home_items WHERE id = ?", (item_id,))
         item = dict_from_row(cursor.fetchone())
 
-        # 3. 保存口述记录
+        # 3. 先保存口述记录，获取ID后再存储关系素材
         cursor.execute("""
             INSERT INTO narration_records (pet_id, raw_text, parsed_memory_type, parsed_title, parsed_content,
                 generated_item_name, generated_item_type, ai_response, is_processed)
@@ -1837,6 +2016,39 @@ def auto_grow_from_narration(pet_id: int, narration_text: str = Query(..., descr
         """, (pet_id, narration_text, result.get("parsed_memory_type"), result.get("parsed_title"),
               result.get("parsed_content"), result.get("generated_item_name"),
               result.get("generated_item_type"), result.get("ai_response")))
+        narration_record_id = cursor.lastrowid
+
+        # 4. 存储关系素材
+        rel_materials = result.get("relationship_materials", {})
+        fixed_actions = rel_materials.get("fixed_actions", []) or []
+        owner_phrases = rel_materials.get("owner_phrases", []) or []
+        habits = rel_materials.get("habits", []) or []
+
+        for action in fixed_actions:
+            cursor.execute("""
+                INSERT INTO relationship_materials (pet_id, material_type, content, source_narration_id, provenance, confidence)
+                VALUES (?, 'fixed_action', ?, ?, 'user_reported', 1.0)
+            """, (pet_id, action, narration_record_id))
+
+        for phrase in owner_phrases:
+            cursor.execute("""
+                INSERT INTO relationship_materials (pet_id, material_type, content, source_narration_id, provenance, confidence)
+                VALUES (?, 'owner_phrase', ?, ?, 'user_reported', 1.0)
+            """, (pet_id, phrase, narration_record_id))
+
+        for habit in habits:
+            cursor.execute("""
+                INSERT INTO relationship_materials (pet_id, material_type, content, source_narration_id, provenance, confidence)
+                VALUES (?, 'habit', ?, ?, 'user_reported', 1.0)
+            """, (pet_id, habit, narration_record_id))
+
+        # 5. 存储推断的性格特征
+        inferred = result.get("inferred_traits", []) or []
+        for trait in inferred:
+            cursor.execute("""
+                INSERT INTO inferred_traits (pet_id, trait, trait_category, source_memory_id, confidence)
+                VALUES (?, ?, 'personality', ?, 0.7)
+            """, (pet_id, trait, memory_id))
 
         return {
             "ai_response": result.get("ai_response"),
@@ -1845,6 +2057,71 @@ def auto_grow_from_narration(pet_id: int, narration_text: str = Query(..., descr
             "growth_level": 1,
             "message": f"世界又生长了一点 ✨"
         }
+
+# ============ Relationship Materials Endpoints ============
+
+@router.get("/pets/{pet_id}/relationship-materials", response_model=List[RelationshipMaterialResponse], tags=["Relationship"])
+def get_relationship_materials(pet_id: int, material_type: Optional[str] = None):
+    """获取宠物的关系素材"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT id FROM pets WHERE id = ?", (pet_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Pet not found")
+
+        if material_type:
+            cursor.execute("""
+                SELECT * FROM relationship_materials
+                WHERE pet_id = ? AND material_type = ? AND is_active = 1
+                ORDER BY confidence DESC, created_at DESC
+            """, (pet_id, material_type))
+        else:
+            cursor.execute("""
+                SELECT * FROM relationship_materials
+                WHERE pet_id = ? AND is_active = 1
+                ORDER BY confidence DESC, created_at DESC
+            """, (pet_id,))
+        return [dict_from_row(row) for row in cursor.fetchall()]
+
+@router.get("/pets/{pet_id}/inferred-traits", response_model=List[InferredTraitResponse], tags=["Relationship"])
+def get_inferred_traits(pet_id: int):
+    """获取宠物的推断性格特征"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT id FROM pets WHERE id = ?", (pet_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Pet not found")
+
+        cursor.execute("""
+            SELECT * FROM inferred_traits
+            WHERE pet_id = ? ORDER BY confidence DESC, created_at DESC
+        """, (pet_id,))
+        return [dict_from_row(row) for row in cursor.fetchall()]
+
+@router.get("/pets/{pet_id}/puppyland-shared", response_model=List[PuppylandSharedResponse], tags=["Relationship"])
+def get_puppyland_shared(pet_id: int, shared_type: Optional[str] = None):
+    """获取在Puppyland中共同创造的内容"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT id FROM pets WHERE id = ?", (pet_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Pet not found")
+
+        if shared_type:
+            cursor.execute("""
+                SELECT * FROM puppyland_shared
+                WHERE pet_id = ? AND shared_type = ?
+                ORDER BY usage_count DESC, created_at DESC
+            """, (pet_id, shared_type))
+        else:
+            cursor.execute("""
+                SELECT * FROM puppyland_shared
+                WHERE pet_id = ? ORDER BY usage_count DESC, created_at DESC
+            """, (pet_id,))
+        return [dict_from_row(row) for row in cursor.fetchall()]
 
 # ============ ASR (语音识别) ============
 
@@ -1925,7 +2202,9 @@ def extract_pet_info(text: str = Query(..., description="用户口述的原始�
     "color": "主要毛色，如白色/黄色/黑色/棕色/灰色/奶油色/花色，或 null",
     "personality_traits": ["性格关键词列表，如胆小/黏人/贪吃/活泼/安静/爱叫/聪明/调皮/忠诚/倔强，最多3个"],
     "key_objects": ["描述中提到的宠物用品/玩具，如球/骨头/玩具/毯子/窝，最多2个"],
-    "habits": ["描述中提到的宠物习惯，如转圈/扑人/等门/晒太阳/护食，最多2个"]
+    "habits": ["描述中提到的宠物习惯，如转圈/扑人/等门/晒太阳/护食，最多2个"],
+    "fixed_actions": ["具体的行为链描述，如'等主人放包脱鞋后才慢吞吞过来'/'一听到钥匙声就冲过来'，最多2个"],
+    "owner_phrases": ["主人经常对宠物说的固定用语，如'想我就直说嘛'/'肉肉好了'，最多2个"]
 }}
 
 只返回JSON。"""
@@ -1933,16 +2212,15 @@ def extract_pet_info(text: str = Query(..., description="用户口述的原始�
             temperature=0.2
         )
 
-        import json as _json
         result_text = response.choices[0].message.content
-        json_match = re.search(r'\{[^}]+\}', result_text, re.DOTALL)
-        if json_match:
-            result = _json.loads(json_match.group())
-            breed = result.get("breed")
-            color = result.get("color")
-            personality_traits = result.get("personality_traits") or []
-            key_objects = result.get("key_objects") or []
-            habits = result.get("habits") or []
+        result = parse_llm_json_response(result_text)
+        breed = result.get("breed")
+        color = result.get("color")
+        personality_traits = result.get("personality_traits") or []
+        key_objects = result.get("key_objects") or []
+        habits = result.get("habits") or []
+        fixed_actions = result.get("fixed_actions") or []
+        owner_phrases = result.get("owner_phrases") or []
 
     except Exception as e:
         pass  # 网络错误时降级，只返回正则提取的名字
@@ -1954,5 +2232,469 @@ def extract_pet_info(text: str = Query(..., description="用户口述的原始�
         "personality_traits": personality_traits,
         "key_objects": key_objects,
         "habits": habits,
+        "fixed_actions": fixed_actions if 'fixed_actions' in dir() else [],
+        "owner_phrases": owner_phrases if 'owner_phrases' in dir() else [],
         "raw_text": text
     }
+
+# ============ Daily Letter Endpoints (每日信件) ============
+
+@router.get("/pets/{pet_id}/daily-letter", response_model=DailyLetterResponse, tags=["DailyLetter"])
+def get_daily_letter(pet_id: int, letter_date: Optional[str] = Query(None, description="信件日期，格式YYYY-MM-DD，不传则默认今天")):
+    """
+    获取指定日期的每日信件
+    - 如果日期不存在，生成默认信件
+    - 如果有新的聊天记录（比生成时多3条以上），自动重新生成个性化信件
+    """
+    from datetime import datetime
+    from backend_app.database import get_db_connection
+
+    if not letter_date:
+        letter_date = datetime.now().strftime("%Y-%m-%d")
+
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT id FROM pets WHERE id = ?", (pet_id,))
+        if not cursor.fetchone():
+            conn.close()
+            raise HTTPException(status_code=404, detail="Pet not found")
+
+        cursor.execute("""
+            SELECT * FROM daily_letters WHERE pet_id = ? AND letter_date = ?
+        """, (pet_id, letter_date))
+        row = cursor.fetchone()
+
+        if row:
+            # 检查是否需要基于新聊天重新生成
+            cursor.execute("""
+                SELECT COUNT(*) FROM chat_messages
+                WHERE pet_id = ? AND date(created_at) = ?
+            """, (pet_id, letter_date))
+            current_chat_count = cursor.fetchone()[0]
+            letter_chat_count = row['based_on_chat_count'] or 0
+
+            # 如果当前聊天数比生成时多了8条以上，重新生成（无论是否已有个性化信件）
+            chat_growth = current_chat_count - letter_chat_count
+            should_regenerate = (chat_growth >= 8)
+
+            if should_regenerate:
+                # 收集所有需要的数据
+                cursor.execute("SELECT * FROM pets WHERE id = ?", (pet_id,))
+                pet = dict_from_row(cursor.fetchone())
+
+                cursor.execute("""
+                    SELECT material_type, content FROM relationship_materials
+                    WHERE pet_id = ? AND is_active = 1 ORDER BY confidence DESC
+                """, (pet_id,))
+                materials = cursor.fetchall()
+                fixed_actions = [m[1] for m in materials if m[0] == 'fixed_action']
+                owner_phrases = [m[1] for m in materials if m[0] == 'owner_phrase']
+                habits = [m[1] for m in materials if m[0] == 'habit']
+
+                cursor.execute("""
+                    SELECT trait FROM inferred_traits WHERE pet_id = ? ORDER BY confidence DESC LIMIT 5
+                """, (pet_id,))
+                traits = [r[0] for r in cursor.fetchall()]
+
+                cursor.execute("""
+                    SELECT content FROM chat_messages
+                    WHERE pet_id = ? AND date(created_at) = ?
+                    ORDER BY created_at DESC LIMIT 5
+                """, (pet_id, letter_date))
+                recent_chats = [r[0] for r in cursor.fetchall()]
+
+                old_letter_id = row['id']
+                pet_name = pet.get('name', 'TA') if pet else 'TA'
+
+                # 关闭连接后再调用LLM
+                conn.commit()
+                conn.close()
+
+                # 生成新内容
+                content = _generate_letter_content(
+                    pet_name, traits, fixed_actions, owner_phrases, habits, recent_chats,
+                    is_personalized=True
+                )
+
+                # 重新连接并保存
+                conn2 = get_db_connection()
+                try:
+                    cursor2 = conn2.cursor()
+                    cursor2.execute("DELETE FROM daily_letters WHERE id = ?", (old_letter_id,))
+                    cursor2.execute("""
+                        INSERT INTO daily_letters (pet_id, letter_date, content, is_generated, based_on_chat_count)
+                        VALUES (?, ?, ?, 1, ?)
+                    """, (pet_id, letter_date, content, current_chat_count))
+                    letter_id = cursor2.lastrowid
+                    cursor2.execute("SELECT * FROM daily_letters WHERE id = ?", (letter_id,))
+                    result = dict_from_row(cursor2.fetchone())
+                finally:
+                    conn2.close()
+                return result
+
+            cursor.execute("SELECT * FROM daily_letters WHERE id = ?", (row['id'],))
+            result = dict_from_row(cursor.fetchone())
+            conn.commit()
+            conn.close()
+            return result
+
+        conn.commit()
+        conn.close()
+        # 如果没有当天的信件，生成默认信件
+        return _generate_default_letter(pet_id, letter_date)
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise
+
+        # 如果没有当天的信件，生成默认信件
+        return _generate_default_letter(pet_id, letter_date)
+
+
+def _generate_default_letter(pet_id: int, letter_date: str) -> dict:
+    """生成默认信件内容"""
+    import os
+    from datetime import datetime
+    from openai import OpenAI
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM pets WHERE id = ?", (pet_id,))
+        pet = dict_from_row(cursor.fetchone())
+
+        # 获取关系素材
+        cursor.execute("""
+            SELECT material_type, content FROM relationship_materials
+            WHERE pet_id = ? AND is_active = 1 ORDER BY confidence DESC LIMIT 5
+        """, (pet_id,))
+        materials = cursor.fetchall()
+
+        # 获取性格特征
+        cursor.execute("""
+            SELECT trait FROM inferred_traits WHERE pet_id = ? ORDER BY confidence DESC LIMIT 3
+        """, (pet_id,))
+        traits = [row[0] for row in cursor.fetchall()]
+
+        pet_name = pet.get('name', 'TA') if pet else 'TA'
+
+        # 生成默认信件prompt
+        prompt = f"""你是{pet_name}，一只已经离开的小狗。请以小狗的口吻，写一封给主人的每日信件。
+
+要求：
+1. 温暖、治愈的风格
+2. 30-50字左右
+3. 以"我最爱的主人："开头
+4. 不要提及具体日期或时间
+5. 表达对主人的思念和陪伴
+
+请直接返回信件内容，不要加引号或任何格式。"""
+
+        try:
+            client = OpenAI(api_key=os.getenv("api_key"), base_url=os.getenv("base_url"))
+            response = client.chat.completions.create(
+                model=os.getenv("model", "deepseek-v4-pro"),
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.8,
+                max_tokens=200
+            )
+            content = response.choices[0].message.content.strip()
+        except Exception as e:
+            content = f"我最爱的主人：今天也很好。记得我一直在。{pet_name}"
+
+        # 保存到数据库
+        cursor.execute("""
+            INSERT INTO daily_letters (pet_id, letter_date, content, is_generated, based_on_chat_count)
+            VALUES (?, ?, ?, 0, 0)
+        """, (pet_id, letter_date, content))
+        letter_id = cursor.lastrowid
+
+        cursor.execute("SELECT * FROM daily_letters WHERE id = ?", (letter_id,))
+        return dict_from_row(cursor.fetchone())
+
+
+def _generate_letter_content(pet_name: str, traits: list, fixed_actions: list,
+                              owner_phrases: list, habits: list, recent_chats: list,
+                              is_personalized: bool = False) -> str:
+    """生成信件内容的辅助函数（不涉及数据库操作）"""
+    import os
+    from openai import OpenAI
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+
+    if is_personalized and recent_chats:
+        prompt = f"""你是{pet_name}，一只已经离开的小狗。请以小狗的口吻，写一封给主人的每日信件。
+
+宠物的名字：{pet_name}
+性格特征：{', '.join(traits) if traits else '可爱'}
+
+关系素材（这些是你们之间真实发生过的事）：
+{chr(10).join([f"- {a}" for a in fixed_actions[:3]]) if fixed_actions else "- 陪伴主人"}
+主人常说的话：{', '.join([f'"{p}"' for p in owner_phrases[:2]]) if owner_phrases else '无'}
+习惯：{', '.join([f"{h}" for h in habits[:2]]) if habits else '无'}
+
+今天的聊天内容：
+{chr(10).join([f"- {c}" for c in recent_chats]) if recent_chats else '无'}
+
+要求：
+1. 温暖、治愈的风格，30-80字左右
+2. 以"我最爱的主人："开头
+3. 贴合上述关系素材和聊天内容，不要复述，要自然承接
+4. 不要提及具体日期
+5. 信件风格参考：提到某些具体的习惯或动作，表达思念和陪伴
+
+请直接返回信件内容，不要加引号或任何格式。"""
+    else:
+        prompt = f"""你是{pet_name}，一只已经离开的小狗。请以小狗的口吻，写一封给主人的每日信件。
+
+要求：
+1. 温暖、治愈的风格
+2. 30-50字左右
+3. 以"我最爱的主人："开头
+4. 不要提及具体日期或时间
+5. 表达对主人的思念和陪伴
+
+请直接返回信件内容，不要加引号或任何格式。"""
+
+    try:
+        client = OpenAI(api_key=os.getenv("api_key"), base_url=os.getenv("base_url"))
+        response = client.chat.completions.create(
+            model=os.getenv("model", "deepseek-v4-pro"),
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.8,
+            max_tokens=300
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"我最爱的主人：今天也很好。记得我一直在。{pet_name}"
+
+
+def _generate_personalized_letter(pet_id: int, letter_date: str, current_chat_count: int) -> dict:
+    """基于聊天增量重新生成个性化信件"""
+    import os
+    from openai import OpenAI
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT * FROM pets WHERE id = ?", (pet_id,))
+        pet = dict_from_row(cursor.fetchone())
+
+        # 获取关系素材
+        cursor.execute("""
+            SELECT material_type, content FROM relationship_materials
+            WHERE pet_id = ? AND is_active = 1 ORDER BY confidence DESC
+        """, (pet_id,))
+        materials = cursor.fetchall()
+        fixed_actions = [row[1] for row in materials if row[0] == 'fixed_action']
+        owner_phrases = [row[1] for row in materials if row[0] == 'owner_phrase']
+        habits = [row[1] for row in materials if row[0] == 'habit']
+
+        # 获取性格特征
+        cursor.execute("""
+            SELECT trait FROM inferred_traits WHERE pet_id = ? ORDER BY confidence DESC LIMIT 5
+        """, (pet_id,))
+        traits = [row[0] for row in cursor.fetchall()]
+
+        # 获取当天的聊天记录
+        cursor.execute("""
+            SELECT content FROM chat_messages
+            WHERE pet_id = ? AND date(created_at) = ?
+            ORDER BY created_at DESC LIMIT 5
+        """, (pet_id, letter_date))
+        recent_chats = [row[0] for row in cursor.fetchall()]
+
+        pet_name = pet.get('name', 'TA') if pet else 'TA'
+
+        letters_prompt = f"""你是{pet_name}，一只已经离开的小狗。请以小狗的口吻，写一封给主人的每日信件。
+
+宠物的名字：{pet_name}
+性格特征：{', '.join(traits) if traits else '可爱'}
+
+关系素材（这些是你们之间真实发生过的事）：
+{chr(10).join([f"- {a}" for a in fixed_actions[:3]]) if fixed_actions else "- 陪伴主人"}
+主人常说的话：{', '.join([f'"{p}"' for p in owner_phrases[:2]]) if owner_phrases else '无'}
+习惯：{', '.join([f"{h}" for h in habits[:2]]) if habits else '无'}
+
+今天的聊天内容：
+{chr(10).join([f"- {c}" for c in recent_chats]) if recent_chats else '无'}
+
+要求：
+1. 温暖、治愈的风格，30-80字左右
+2. 以"我最爱的主人："开头
+3. 贴合上述关系素材和聊天内容，不要复述，要自然承接
+4. 不要提及具体日期
+5. 信件风格参考：提到某些具体的习惯或动作，表达思念和陪伴
+
+请直接返回信件内容，不要加引号或任何格式。"""
+
+        try:
+            client = OpenAI(api_key=os.getenv("api_key"), base_url=os.getenv("base_url"))
+            response = client.chat.completions.create(
+                model=os.getenv("model", "deepseek-v4-pro"),
+                messages=[{"role": "user", "content": letters_prompt}],
+                temperature=0.8,
+                max_tokens=300
+            )
+            content = response.choices[0].message.content.strip()
+        except Exception as e:
+            content = f"我最爱的主人：今天也很好。记得我一直在。{pet_name}"
+
+        # 保存到数据库
+        cursor.execute("""
+            INSERT INTO daily_letters (pet_id, letter_date, content, is_generated, based_on_chat_count)
+            VALUES (?, ?, ?, 1, ?)
+        """, (pet_id, letter_date, content, current_chat_count))
+        letter_id = cursor.lastrowid
+
+        cursor.execute("SELECT * FROM daily_letters WHERE id = ?", (letter_id,))
+        return dict_from_row(cursor.fetchone())
+
+
+@router.post("/pets/{pet_id}/daily-letter/generate", response_model=DailyLetterResponse, tags=["DailyLetter"])
+def generate_daily_letter(pet_id: int, request: GenerateLetterRequest = None):
+    """
+    手动触发生成当日的每日信件
+    根据当天聊天记录数量决定生成个性化信件还是默认信件
+    聊天记录>=3条时生成个性化信件
+    """
+    import os
+    from datetime import datetime
+    from openai import OpenAI
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+
+    letter_date = request.letter_date if request and request.letter_date else datetime.now().strftime("%Y-%m-%d")
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT id FROM pets WHERE id = ?", (pet_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Pet not found")
+
+        # 获取当天的聊天记录数量
+        cursor.execute("""
+            SELECT COUNT(*) FROM chat_messages
+            WHERE pet_id = ? AND date(created_at) = ?
+        """, (pet_id, letter_date))
+        chat_count = cursor.fetchone()[0]
+
+        # 获取宠物信息
+        cursor.execute("SELECT * FROM pets WHERE id = ?", (pet_id,))
+        pet = dict_from_row(cursor.fetchone())
+
+        # 获取关系素材
+        cursor.execute("""
+            SELECT material_type, content FROM relationship_materials
+            WHERE pet_id = ? AND is_active = 1 ORDER BY confidence DESC
+        """, (pet_id,))
+        materials = cursor.fetchall()
+        fixed_actions = [row[1] for row in materials if row[0] == 'fixed_action']
+        owner_phrases = [row[1] for row in materials if row[0] == 'owner_phrase']
+        habits = [row[1] for row in materials if row[0] == 'habit']
+
+        # 获取性格特征
+        cursor.execute("""
+            SELECT trait FROM inferred_traits WHERE pet_id = ? ORDER BY confidence DESC LIMIT 5
+        """, (pet_id,))
+        traits = [row[0] for row in cursor.fetchall()]
+
+        # 获取最近的聊天记录（用于生成个性化内容）
+        cursor.execute("""
+            SELECT content FROM chat_messages
+            WHERE pet_id = ? AND date(created_at) = ?
+            ORDER BY created_at DESC LIMIT 5
+        """, (pet_id, letter_date))
+        recent_chats = [row[0] for row in cursor.fetchall()]
+
+        pet_name = pet.get('name', 'TA') if pet else 'TA'
+
+        # 根据聊天记录数量决定生成内容
+        if chat_count >= 3:
+            # 生成个性化信件
+            letters_prompt = f"""你是{pet_name}，一只已经离开的小狗。请以小狗的口吻，写一封给主人的每日信件。
+
+宠物的名字：{pet_name}
+性格特征：{', '.join(traits) if traits else '可爱'}
+
+关系素材（这些是你们之间真实发生过的事）：
+{chr(10).join([f"- {a}" for a in fixed_actions[:3]]) if fixed_actions else "- 陪伴主人"}
+主人常说的话：{', '.join([f'"{p}"' for p in owner_phrases[:2]]) if owner_phrases else '无'}
+习惯：{', '.join([f"{h}" for h in habits[:2]]) if habits else '无'}
+
+今天的聊天内容：
+{chr(10).join([f"- {c}" for c in recent_chats]) if recent_chats else '无'}
+
+要求：
+1. 温暖、治愈的风格，30-80字左右
+2. 以"我最爱的主人："开头
+3. 贴合上述关系素材和聊天内容，不要复述，要自然承接
+4. 不要提及具体日期
+5. 信件风格参考：提到某些具体的习惯或动作，表达思念和陪伴
+
+请直接返回信件内容，不要加引号或任何格式。"""
+        else:
+            # 生成默认信件
+            letters_prompt = f"""你是{pet_name}，一只已经离开的小狗。请以小狗的口吻，写一封给主人的每日信件。
+
+要求：
+1. 温暖、治愈的风格，30-50字左右
+2. 以"我最爱的主人："开头
+3. 不要提及具体日期
+4. 表达对主人的思念和陪伴
+
+请直接返回信件内容，不要加引号或任何格式。"""
+
+        try:
+            client = OpenAI(api_key=os.getenv("api_key"), base_url=os.getenv("base_url"))
+            response = client.chat.completions.create(
+                model=os.getenv("model", "deepseek-v4-pro"),
+                messages=[{"role": "user", "content": letters_prompt}],
+                temperature=0.8,
+                max_tokens=300
+            )
+            content = response.choices[0].message.content.strip()
+        except Exception as e:
+            content = f"我最爱的主人：今天也很好。记得我一直在。{pet_name}"
+
+        # 删除旧信件（如果存在）
+        cursor.execute("""
+            DELETE FROM daily_letters WHERE pet_id = ? AND letter_date = ?
+        """, (pet_id, letter_date))
+
+        # 保存新信件
+        cursor.execute("""
+            INSERT INTO daily_letters (pet_id, letter_date, content, is_generated, based_on_chat_count)
+            VALUES (?, ?, ?, ?, ?)
+        """, (pet_id, letter_date, content, 1 if chat_count >= 3 else 0, chat_count))
+        letter_id = cursor.lastrowid
+
+        cursor.execute("SELECT * FROM daily_letters WHERE id = ?", (letter_id,))
+        return dict_from_row(cursor.fetchone())
+
+
+@router.get("/pets/{pet_id}/daily-letter/history", response_model=List[DailyLetterResponse], tags=["DailyLetter"])
+def get_letter_history(pet_id: int, limit: int = Query(7, ge=1, le=30)):
+    """获取最近的信件历史"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT id FROM pets WHERE id = ?", (pet_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Pet not found")
+
+        cursor.execute("""
+            SELECT * FROM daily_letters WHERE pet_id = ?
+            ORDER BY letter_date DESC LIMIT ?
+        """, (pet_id, limit))
+        return [dict_from_row(row) for row in cursor.fetchall()]
+
