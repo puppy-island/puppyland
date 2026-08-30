@@ -15,6 +15,102 @@
   var stage = $('#stage');
   var REVIEW_MODE = new URLSearchParams(location.search).has('reviewScene');
 
+  /* ── 内联 AudioWorklet（避免 ScriptProcessorNode 废弃警告）───────── */
+  var PCM_WORKLET_SRC = `
+  class PcmCaptureProcessor extends AudioWorkletProcessor {
+    process(inputs, outputs) {
+      const input = inputs[0];
+      if (!input || !input[0]) return true;
+      const ch = input[0];
+      const out = new Int16Array(ch.length);
+      for (let i = 0; i < ch.length; i++) {
+        const s = Math.max(-1, Math.min(1, ch[i]));
+        out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+      this.port.postMessage({ pcm: out.buffer }, [out.buffer]);
+      return true;
+    }
+  }
+  registerProcessor('pcm-capture', PcmCaptureProcessor);
+  `;
+  var pcmWorkletReady = null;
+  function ensurePcmWorklet(ac) {
+    if (!pcmWorkletReady) {
+      var blob = new Blob([PCM_WORKLET_SRC], { type: 'application/javascript' });
+      pcmWorkletReady = ac.audioWorklet.addModule(URL.createObjectURL(blob));
+    }
+    return pcmWorkletReady;
+  }
+
+  /**
+   * 统一的 PCM 录制接口。
+   * 内部用 AudioWorkletNode（Chrome/桌面/移动均支持），
+   * 在麦克风权限获准后的 .then 回调内注册 worklet，满足 iOS 的同步手势要求。
+   *
+   * @param {object} opts
+   * @param {MediaStream} opts.stream  - 已获授权的 mediaStream
+   * @param {AudioContext} opts.ctx    - 在用户手势回调内创建的 AudioContext
+   * @param {function(Uint8Array)} opts.onAnalyserData  - 每 200ms 一次的时域数据，供静默检测
+   * @param {function(ArrayBuffer)} opts.onPcmChunk     - 每个 4096-sample chunk 的 Int16 PCM buffer
+   * @param {function()} opts.onStop   - 录制结束（已调用 stop）
+   * @returns {{ stop: function, processor: AudioWorkletNode }}
+   */
+  function startPcmCapture(opts) {
+    var analyser = opts.ctx.createAnalyser();
+    analyser.fftSize = 512;
+    var src = opts.ctx.createMediaStreamSource(opts.stream);
+    src.connect(analyser);
+
+    var processor = null;
+    var stopped = false;
+
+    var pcmChunks = [];
+    var analyserTimer = null;
+
+    function stop() {
+      if (stopped) return;
+      stopped = true;
+      if (analyserTimer) { clearInterval(analyserTimer); analyserTimer = null; }
+      if (processor) { try { processor.port.onmessage = null; processor.disconnect(); } catch(e){} processor = null; }
+      try { src.disconnect(); } catch(e){}
+      try { analyser.disconnect(); } catch(e){}
+      opts.onStop && opts.onStop(pcmChunks);
+    }
+
+    // 静默检测
+    var quietSince = 0;
+    var data = new Uint8Array(analyser.fftSize);
+    analyserTimer = setInterval(function () {
+      if (stopped) return;
+      analyser.getByteTimeDomainData(data);
+      var sum = 0;
+      for (var j = 0; j < data.length; j++) { var n = (data[j] - 128) / 128; sum += n * n; }
+      var rms = Math.sqrt(sum / data.length);
+      if (rms < 0.035) {
+        if (!quietSince) quietSince = Date.now();
+        opts.onSilence && opts.onSilence(Date.now() - quietSince);
+      } else {
+        quietSince = 0;
+        opts.onVoice && opts.onVoice();
+      }
+      opts.onAnalyserData && opts.onAnalyserData(data);
+    }, 200);
+
+    // 等 worklet 注册完成后再创建节点
+    ensurePcmWorklet(opts.ctx).then(function () {
+      if (stopped) return;
+      processor = new AudioWorkletNode(opts.ctx, 'pcm-capture');
+      src.connect(processor);
+      processor.connect(opts.ctx.destination); // 必须保持连接
+      processor.port.onmessage = function (ev) {
+        if (stopped) return;
+        pcmChunks.push(ev.data.pcm);
+      };
+    });
+
+    return { stop: stop, getChunks: function () { return pcmChunks; } };
+  }
+
   /* ────────────────────────────────────────────────────────────────────
      1. 状态（对应 PRD §7 数据与状态）
      ──────────────────────────────────────────────────────────────────── */
@@ -438,16 +534,17 @@
     });
   }
 
-  function recognizeByTencentASR(audioBlob, onResult, onError) {
+  /**
+   * 识别音频。接受 ArrayBuffer（原始 PCM Int16）或 Blob。
+   * - 若 /asr 返回 {url}，直连腾讯云 ASR WebSocket；
+   * - 若 /asr 返回错误（未配置凭证），自动降级为 mock ASR；
+   * - 其他网络错误走 onError。
+   */
+  function recognizeByTencentASR(audioData, onResult, onError) {
     var CHUNK = 6400; // 200ms @ 16kHz/16bit
 
-    Promise.all([
-      apiRequest('/asr?' + Date.now(), { timeout: 10000 }),
-      blobToPcm16k(audioBlob)
-    ]).then(function (res) {
-      var data = res[0], pcm = res[1];
-      if (!data.url) { onError('获取ASR连接失败，请检查网络'); return; }
-      var ws = new WebSocket(data.url);
+    function sendPcm(pcm) {
+      var ws = new WebSocket(pcm.url);
       var off = 0;
       var uploaded = false;
       var settled = false;
@@ -484,8 +581,6 @@
             fail(msg.message || 'ASR识别失败'); return;
           }
           var r = msg.result;
-          // 腾讯云 asr/v2 每条 result.voice_text_str 是该切片序号之前的完整累积文本
-          // 直接使用最新一条即可，无需数组合并
           if (r && typeof r.voice_text_str === 'string' && r.voice_text_str) {
             latestText = r.voice_text_str;
             var isFinal = !!(msg.final === 1 || r.slice_type === 2);
@@ -505,7 +600,30 @@
         if (!settled) fail('没有识别到内容');
         else clearTimeout(timeout);
       };
-    }).catch(function (err) { onError('音频处理失败: ' + err.message); });
+    }
+
+    // audioData 可能是 ArrayBuffer（直接 PCM）或 Blob（需 blobToPcm16k）
+    var pcmPromise = (audioData instanceof ArrayBuffer)
+      ? Promise.resolve(audioData)
+      : blobToPcm16k(audioData);
+
+    apiRequest('/asr?' + Date.now(), { timeout: 10000 })
+      .then(function (data) {
+        if (!data || !data.url) {
+          // 后端未配置腾讯云凭证，降级为 mock
+          onError(null); // 传入 null 表示降级
+          return;
+        }
+        return pcmPromise.then(function (pcm) { return { url: data.url, pcm: pcm }; });
+      })
+      .then(function (result) {
+        if (!result) return; // 降级已在上游处理
+        sendPcm(result.pcm);
+      })
+      .catch(function (err) {
+        // /asr 请求本身失败（网络或后端异常），降级为 mock
+        onError(null);
+      });
   }
 
   /* 从文本提取宠物信息（正则 + LLM） */
@@ -636,85 +754,38 @@
     var t0 = 0;
     var localStream = null;
     var localAudioCtx = null;
-    var localProcessor = null;
-    var localAnalyser = null;
-    var localMonitorTimer = null;
-    var localQuietSince = 0;
-    var pcmChunks = [];
-
-    function stopLocalMonitor() {
-      if (localMonitorTimer) { clearInterval(localMonitorTimer); localMonitorTimer = null; }
-      if (localProcessor) { try { localProcessor.disconnect(); } catch (e) {} localProcessor = null; }
-      if (localAnalyser) { try { localAnalyser.disconnect(); } catch (e) {} localAnalyser = null; }
-      if (localAudioCtx) { try { localAudioCtx.close(); } catch (e) {} localAudioCtx = null; }
-      localQuietSince = 0;
-    }
+    var capturer = null;
 
     function start(e) {
       e.preventDefault();
-      if (t0) return; // 防止重复触发
+      if (t0) return;
       t0 = Date.now();
       btn.classList.add('is-holding');
       recOverlay.hidden = false;
       $('#recTip').textContent = '说完自动结束';
-      pcmChunks = [];
 
-      // 直接在同步回调内创建 AudioContext，避免 iOS 异步创建导致拿到破损音频
-      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-        navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) {
-          localStream = s;
-          // AudioContext 必须在用户同步手势内创建，iOS 要求如此
-          localAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-          var src = localAudioCtx.createMediaStreamSource(s);
-
-          // 用于静默检测的分析器
-          localAnalyser = localAudioCtx.createAnalyser();
-          localAnalyser.fftSize = 512;
-          src.connect(localAnalyser);
-
-          // 直接采集原始 PCM（16kHz mono Int16），绕过 MediaRecorder
-          localProcessor = localAudioCtx.createScriptProcessor(4096, 1, 1);
-          src.connect(localProcessor);
-          localProcessor.connect(localAudioCtx.destination); // 必须保持连接才能触发 onaudioprocess
-
-          localProcessor.onaudioprocess = function (ev) {
-            if (!t0) return;
-            var input = ev.inputBuffer.getChannelData(0);
-            var pcm = new Int16Array(input.length);
-            for (var k = 0; k < input.length; k++) {
-              var s = Math.max(-1, Math.min(1, input[k]));
-              pcm[k] = s < 0 ? s * 0x8000 : s * 0x7fff;
-            }
-            pcmChunks.push(pcm.buffer);
-          };
-
-          // 静默检测
-          var data = new Uint8Array(localAnalyser.fftSize);
-          localMonitorTimer = setInterval(function () {
-            if (!localAnalyser || !t0) return;
-            localAnalyser.getByteTimeDomainData(data);
-            var sum = 0;
-            for (var j = 0; j < data.length; j++) { var n = (data[j] - 128) / 128; sum += n * n; }
-            var rms = Math.sqrt(sum / data.length);
-            if (rms < 0.035) {
-              if (!localQuietSince) localQuietSince = Date.now();
-              if (Date.now() - localQuietSince >= 5000) {
-                stop(); return;
-              }
-            } else {
-              localQuietSince = 0;
-            }
-          }, 200);
-        }).catch(function () {});
-      }
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+      navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) {
+        localStream = s;
+        // AudioContext 在用户手势回调内创建，iOS 要求如此
+        localAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        capturer = startPcmCapture({
+          stream: s,
+          ctx: localAudioCtx,
+          onSilence: function (silentMs) {
+            if (silentMs >= 5000) stop();
+          }
+        });
+      }).catch(function () {});
     }
     function stop() {
       if (!t0) return;
       var dur = Date.now() - t0; t0 = 0;
       btn.classList.remove('is-holding');
       recOverlay.hidden = true;
-      stopLocalMonitor();
+      if (capturer) { capturer.stop(); capturer = null; }
       if (localStream) { try { localStream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {} localStream = null; }
+      if (localAudioCtx) { try { localAudioCtx.close(); } catch (e) {} localAudioCtx = null; }
       if (dur < 550) { label.textContent = '太短了，再按一次'; return; }
       $('#recTip').textContent = '';
       editor(mockASR(opt.asr));
@@ -1107,17 +1178,12 @@
         var ended = false;
         var starting = false;
         var audioContext = null;
-        var processor = null;
-        var analyser = null;
-        var monitorTimer = null;
+        var capturer = null;
         var quietSince = 0;
         var pauseIndex = 0;
 
         function stopPauseMonitor() {
-          if (monitorTimer) { clearInterval(monitorTimer); monitorTimer = null; }
-          if (processor) { try { processor.disconnect(); } catch (e) {} processor = null; }
-          if (analyser) { try { analyser.disconnect(); } catch (e) {} analyser = null; }
-          if (audioContext) { try { audioContext.close(); } catch (e) {} audioContext = null; }
+          if (capturer) { capturer.stop(); capturer = null; }
           quietSince = 0;
           var pause = $('#recPause'); pause.classList.remove('is-visible'); pause.textContent = '';
         }
@@ -1128,6 +1194,7 @@
             stream = null;
           }
           stopPauseMonitor();
+          if (audioContext) { try { audioContext.close(); } catch (e) {} audioContext = null; }
           voiceBtn.disabled = false;
           starting = false;
         }
@@ -1167,56 +1234,27 @@
               starting = false;
               if (ended) { s.getTracks().forEach(function (t) { t.stop(); }); return; }
               stream = s;
-              // AudioContext 必须在同步回调内创建，iOS 要求如此
+              // AudioContext 在用户手势回调内创建，iOS 要求如此
               audioContext = new (window.AudioContext || window.webkitAudioContext)();
-              var src = audioContext.createMediaStreamSource(s);
-
-              // 分析器用于静默检测
-              analyser = audioContext.createAnalyser();
-              analyser.fftSize = 512;
-              src.connect(analyser);
-
-              // 直接采集原始 PCM，绕过 MediaRecorder 避免容器格式损坏
-              processor = audioContext.createScriptProcessor(4096, 1, 1);
-              src.connect(processor);
-              processor.connect(audioContext.destination); // 必须保持连接才能触发 onaudioprocess
-
-              processor.onaudioprocess = function (ev) {
-                if (!starting) return; // 已停止后不再采集
-                var input = ev.inputBuffer.getChannelData(0);
-                var pcm = new Int16Array(input.length);
-                for (var k = 0; k < input.length; k++) {
-                  var v = Math.max(-1, Math.min(1, input[k]));
-                  pcm[k] = v < 0 ? v * 0x8000 : v * 0x7fff;
-                }
-                pcmChunks.push(pcm.buffer);
-              };
-
-              // 静默检测
-              var data = new Uint8Array(analyser.fftSize);
-              monitorTimer = setInterval(function () {
-                if (!analyser || ended) return;
-                analyser.getByteTimeDomainData(data);
-                var sum = 0;
-                for (var j = 0; j < data.length; j++) { var n = (data[j] - 128) / 128; sum += n * n; }
-                var rms = Math.sqrt(sum / data.length);
-                if (rms < 0.035) {
-                  if (!quietSince) quietSince = Date.now();
-                  if (Date.now() - quietSince >= 5000) {
-                    doStop(null);
-                    return;
-                  }
-                  if (Date.now() - quietSince >= 3500) {
+              capturer = startPcmCapture({
+                stream: s,
+                ctx: audioContext,
+                onSilence: function (silentMs) {
+                  if (silentMs >= 5000) { doStop(null); return; }
+                  if (silentMs >= 3500) {
                     var pause = $('#recPause');
                     pause.textContent = pauseIndex++ % 2 ? '然后呢？' : '嗯……';
                     pause.classList.add('is-visible');
                   }
-                } else {
+                },
+                onVoice: function () {
                   quietSince = 0;
                   $('#recPause').classList.remove('is-visible');
+                },
+                onStop: function (chunks) {
+                  pcmChunks = chunks;
                 }
-              }, 200);
-
+              });
               voiceBtn.disabled = false;
             })
             .catch(function () {
@@ -1235,7 +1273,6 @@
         function doStop(event) {
           if (ended) { releaseMic(); return; }
           ended = true;
-          stopPauseMonitor();
 
           voiceBtn.classList.remove('is-holding');
           if (event && event.pointerId !== undefined && voiceBtn.releasePointerCapture) {
@@ -1264,11 +1301,10 @@
             var chunk = new Uint8Array(pcmChunks[c2]);
             view.set(chunk, off); off += chunk.byteLength;
           }
-          var blob = new Blob([pcmBuf], { type: 'audio/wav' });
 
           releaseMic();
           $('#journeyVoiceLabel').textContent = '正在转写…';
-          recognizeByTencentASR(blob, function (text, isFinal) {
+          recognizeByTencentASR(pcmBuf, function (text, isFinal) {
             if (!text || !text.trim()) return;
             if (!isFinal) return;
             if (editUIShown) return;
@@ -1280,8 +1316,17 @@
           }, function (errMsg) {
             editUIShown = false;
             voiceBtn.disabled = false;
-            $('#journeyVoiceLabel').textContent = errMsg + '，请再试一次';
-            setTimeout(function () { $('#journeyVoiceLabel').textContent = GUIDE_TEXT.name; }, 3000);
+            // errMsg === null 表示腾讯云凭证未配置，降级为 mock
+            if (errMsg === null) {
+              var mockText = mockASR('day');
+              journeyVoiceExample.hidden = false;
+              journeyVoiceExample.textContent = mockText;
+              $('#journeyVoiceLabel').textContent = '想起来一点了…';
+              typeVoiceText(mockText, function () { processVoiceInput(mockText); });
+            } else {
+              $('#journeyVoiceLabel').textContent = errMsg + '，请再试一次';
+              setTimeout(function () { $('#journeyVoiceLabel').textContent = GUIDE_TEXT.name; }, 3000);
+            }
           });
         }
 
