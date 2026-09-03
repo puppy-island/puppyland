@@ -17,29 +17,54 @@
 
   /* ── 内联 AudioWorklet（避免 ScriptProcessorNode 废弃警告）───────── */
   var PCM_WORKLET_SRC = `
+  function to16BitPCM(input) {
+    const dataLength = input.length * (16 / 8);
+    const dataBuffer = new ArrayBuffer(dataLength);
+    const dataView = new DataView(dataBuffer);
+    let offset = 0;
+    for (let i = 0; i < input.length; i++, offset += 2) {
+      const s = Math.max(-1, Math.min(1, input[i]));
+      dataView.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+    }
+    return dataView;
+  }
+  function to16kHz(audioData, srcRate) {
+    const data = new Float32Array(audioData);
+    const fitCount = Math.round(data.length * (16000 / srcRate));
+    const newData = new Float32Array(fitCount);
+    const springFactor = data.length <= 1 ? 0 : (data.length - 1) / (fitCount - 1);
+    newData[0] = data[0];
+    for (let i = 1; i < fitCount - 1; i++) {
+      const tmp = i * springFactor;
+      const before = Math.floor(tmp);
+      const after = Math.min(Math.ceil(tmp), data.length - 1);
+      const atPoint = tmp - before;
+      newData[i] = data[before] + (data[after] - data[before]) * atPoint;
+    }
+    newData[fitCount - 1] = data[data.length - 1];
+    return newData;
+  }
   class PcmCaptureProcessor extends AudioWorkletProcessor {
     process(inputs, outputs) {
       const input = inputs[0];
       if (!input || !input[0]) return true;
       const ch = input[0];
-      const out = new Int16Array(ch.length);
-      for (let i = 0; i < ch.length; i++) {
-        const s = Math.max(-1, Math.min(1, ch[i]));
-        out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-      }
-      this.port.postMessage({ pcm: out.buffer }, [out.buffer]);
+      const srcRate = sampleRate;
+      const resampled = to16kHz(ch, srcRate);
+      const pcmView = to16BitPCM(resampled);
+      this.port.postMessage({ pcm: pcmView.buffer }, [pcmView.buffer]);
       return true;
     }
   }
   registerProcessor('pcm-capture', PcmCaptureProcessor);
   `;
-  var pcmWorkletReady = null;
+  var pcmWorkletReady = new Map();
   function ensurePcmWorklet(ac) {
-    if (!pcmWorkletReady) {
+    if (!pcmWorkletReady.has(ac)) {
       var blob = new Blob([PCM_WORKLET_SRC], { type: 'application/javascript' });
-      pcmWorkletReady = ac.audioWorklet.addModule(URL.createObjectURL(blob));
+      pcmWorkletReady.set(ac, ac.audioWorklet.addModule(URL.createObjectURL(blob)));
     }
-    return pcmWorkletReady;
+    return pcmWorkletReady.get(ac);
   }
 
   /**
@@ -96,16 +121,35 @@
       opts.onAnalyserData && opts.onAnalyserData(data);
     }, 200);
 
+    // 确保 AudioContext 处于 running 状态（部分浏览器/Safari 会创建为 suspended）
+    if (opts.ctx.state === 'suspended' && opts.ctx.resume) {
+      opts.ctx.resume().catch(function () {});
+    }
+
     // 等 worklet 注册完成后再创建节点
     ensurePcmWorklet(opts.ctx).then(function () {
       if (stopped) return;
-      processor = new AudioWorkletNode(opts.ctx, 'pcm-capture');
+      try {
+        processor = new AudioWorkletNode(opts.ctx, 'pcm-capture', { numberOfInputs: 1, numberOfOutputs: 1, channelCount: 1 });
+      } catch (e) {
+        if (window.console && console.error) console.error('[PCM] AudioWorkletNode create failed', e);
+        return;
+      }
+      processor.onprocessorerror = function (e) {
+        if (window.console && console.error) console.error('[PCM] processor error', e);
+      };
       src.connect(processor);
       processor.connect(opts.ctx.destination); // 必须保持连接
       processor.port.onmessage = function (ev) {
         if (stopped) return;
-        pcmChunks.push(ev.data.pcm);
+        if (ev.data && ev.data.pcm) {
+          pcmChunks.push(ev.data.pcm);
+          if (pcmChunks.length === 1 && window.console && console.log) console.log('[PCM] first chunk, bytes=', ev.data.pcm.byteLength);
+        }
       };
+      if (window.console && console.log) console.log('[PCM] worklet ready, ctx.sampleRate=', opts.ctx.sampleRate, 'ctx.state=', opts.ctx.state, 'tracks=', (opts.stream.getAudioTracks && opts.stream.getAudioTracks().length));
+    }, function (e) {
+      if (window.console && console.error) console.error('[PCM] addModule failed', e);
     });
 
     return { stop: stop, getChunks: function () { return pcmChunks; } };
@@ -511,7 +555,8 @@
       var reader = new FileReader();
       reader.onload = function () {
         var arrayBuffer = reader.result;
-        var ctx = new (window.AudioContext || window.webkitAudioContext)();
+        var Ctx = window.AudioContext || window.webkitAudioContext;
+    var ctx = new Ctx();
         ctx.decodeAudioData(arrayBuffer).then(function (audioBuffer) {
           var offlineCtx = new OfflineAudioContext(1, audioBuffer.duration * 16000, 16000);
           var source = offlineCtx.createBufferSource();
@@ -541,10 +586,11 @@
    * - 其他网络错误走 onError。
    */
   function recognizeByTencentASR(audioData, onResult, onError) {
-    var CHUNK = 6400; // 200ms @ 16kHz/16bit
+    var CHUNK = 1280; // 40ms @ 16kHz/16bit（官方推荐 1:1 实时率）
 
-    function sendPcm(pcm) {
-      var ws = new WebSocket(pcm.url);
+    function sendPcm(conn) {
+      var pcmBuf = conn.pcm;
+      var ws = new WebSocket(conn.url);
       var off = 0;
       var uploaded = false;
       var settled = false;
@@ -553,22 +599,27 @@
         if (settled) return;
         settled = true;
         clearTimeout(timeout);
-        try { ws.close(); } catch (e) {}
+        if (ws.readyState === WebSocket.OPEN) {
+          try { ws.close(); } catch (e) {}
+        } else if (ws.readyState === WebSocket.CONNECTING) {
+          ws.addEventListener('open', function () { try { ws.close(); } catch (e) {} }, { once: true });
+        }
         onError(msg);
       }
-      var uploadMs = (pcm.byteLength / 6400) * 200;
+      var uploadMs = (pcmBuf.byteLength / 1280) * 40;
       var timeout = setTimeout(function () { fail('ASR识别超时'); }, Math.max(uploadMs + 8000, 15000));
 
       ws.onopen = function () {
+        if (window.console && console.log) console.log('[ASR] open, pcm bytes:', pcmBuf.byteLength);
         function push() {
           if (!ws || ws.readyState !== WebSocket.OPEN) return;
-          if (off >= pcm.byteLength) {
-            if (!uploaded) { uploaded = true; ws.send(JSON.stringify({ type: 'end' })); }
+          if (off >= pcmBuf.byteLength) {
+            if (!uploaded) { uploaded = true; ws.send(JSON.stringify({ type: 'end' })); if (window.console && console.log) console.log('[ASR] end sent'); }
             return;
           }
-          ws.send(pcm.slice(off, Math.min(off + CHUNK, pcm.byteLength)));
+          ws.send(pcmBuf.slice(off, Math.min(off + CHUNK, pcmBuf.byteLength)));
           off += CHUNK;
-          setTimeout(push, 200);
+          setTimeout(push, 40);
         }
         push();
       };
@@ -577,26 +628,39 @@
         if (typeof e.data !== 'string') return;
         try {
           var msg = JSON.parse(e.data);
+          if (window.console && console.log) console.log('[ASR]', JSON.stringify(msg));
           if (msg.code !== 0 && msg.code !== undefined) {
             fail(msg.message || 'ASR识别失败'); return;
           }
+          // 从多字段取文本：result.voice_text_str（当前切片）或 msg.text（累积全文）
           var r = msg.result;
-          if (r && typeof r.voice_text_str === 'string' && r.voice_text_str) {
-            latestText = r.voice_text_str;
-            var isFinal = !!(msg.final === 1 || r.slice_type === 2);
-            onResult(r.voice_text_str, isFinal);
-          }
-          if (msg.final === 1 || r && r.slice_type === 2) {
-            if (!latestText) { fail('没有识别到内容'); return; }
-            if (!(r && r.voice_text_str)) onResult(latestText, true);
-            settled = true;
-            clearTimeout(timeout); try { ws.close(); } catch(e) {}
-          }
+          var text = '';
+          if (r && typeof r.voice_text_str === 'string' && r.voice_text_str) text = r.voice_text_str;
+          else if (typeof msg.text === 'string' && msg.text) text = msg.text;
+          if (text) latestText = text;
+          // 终止条件 1：final === 1（整段识别完成）
+          if (msg.final === 1) { done(latestText); return; }
+          // 终止条件 2：slice_type === 2（一句话结束且有稳态文本）
+          if (r && r.slice_type === 2 && latestText) { done(latestText); return; }
+          // 否则继续等待后续消息
         } catch(err) {}
       };
 
-      ws.onerror = function () { fail('ASR连接失败'); };
-      ws.onclose = function () {
+      function done(text) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (text) {
+          onResult(text, true);
+          if (ws.readyState === WebSocket.OPEN) { try { ws.close(1000); } catch (e) {} }
+        } else {
+          fail('没有识别到内容');
+        }
+      }
+
+      ws.onerror = function (e) { if (window.console && console.log) console.log('[ASR] error', e); fail('ASR连接失败'); };
+      ws.onclose = function (e) {
+        if (window.console && console.log) console.log('[ASR] close', e && e.code, e && e.reason, 'settled=', settled, 'latestText=', latestText);
         if (!settled) fail('没有识别到内容');
         else clearTimeout(timeout);
       };
@@ -618,7 +682,7 @@
       })
       .then(function (result) {
         if (!result) return; // 降级已在上游处理
-        sendPcm(result.pcm);
+        sendPcm(result);
       })
       .catch(function (err) {
         // /asr 请求本身失败（网络或后端异常），降级为 mock
@@ -717,7 +781,7 @@
     wave.appendChild(bar);
   }
 
-  /*  采集组件：按住发光爪印说话 → Mock 转写 → 发送前可编辑 → 失败可退化为文字
+  /*  采集组件：按下发光爪印开始 → 再次按下结束 → Mock 转写 → 发送前可编辑 → 失败可退化为文字
       对应 PRD「语音支持录音、Mock ASR、发送前编辑；失败退化为文字」 */
   function capture(slot, opt) {
     slot.innerHTML = '';
@@ -728,12 +792,12 @@
     var btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'paw-btn';
-    btn.setAttribute('aria-label', opt.hold || '按住说话');
+    btn.setAttribute('aria-label', opt.hold || '按下说话');
     btn.innerHTML = '<svg viewBox="0 0 26 26"><use href="#paw"></use></svg>';
 
     var label = document.createElement('span');
     label.className = 'paw-label';
-    label.textContent = opt.hold || '按住，说给 TA 听';
+    label.textContent = opt.hold || '按下，说给 TA 听';
 
     var alt = document.createElement('button');
     alt.type = 'button';
@@ -751,49 +815,71 @@
       col.appendChild(sk);
     }
 
-    var t0 = 0;
+    // 状态机：'idle' | 'requesting' | 'recording'
+    var state = 'idle';
     var localStream = null;
     var localAudioCtx = null;
     var capturer = null;
 
-    function start(e) {
-      e.preventDefault();
-      if (t0) return;
-      t0 = Date.now();
-      btn.classList.add('is-holding');
-      recOverlay.hidden = false;
-      $('#recTip').textContent = '说完自动结束';
-
+    function requestMic() {
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+      state = 'requesting';
       navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) {
+        if (state !== 'requesting') { s.getTracks().forEach(function (t) { t.stop(); }); return; }
         localStream = s;
-        // AudioContext 在用户手势回调内创建，iOS 要求如此
         localAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
         capturer = startPcmCapture({
           stream: s,
           ctx: localAudioCtx,
           onSilence: function (silentMs) {
-            if (silentMs >= 5000) stop();
+            if (state === 'recording' && silentMs >= 5000) doStop(false);
           }
         });
-      }).catch(function () {});
+        state = 'recording';
+      }).catch(function () {
+        if (state === 'requesting') {
+          state = 'idle';
+          btn.classList.remove('is-holding');
+          recOverlay.hidden = true;
+          label.textContent = '麦克风不可用，请允许权限后重试';
+          setTimeout(function () { label.textContent = opt.hold || '按下，说给 TA 听'; }, 3000);
+        }
+      });
     }
-    function stop() {
-      if (!t0) return;
-      var dur = Date.now() - t0; t0 = 0;
+
+    function doStop(userInitiated) {
       btn.classList.remove('is-holding');
       recOverlay.hidden = true;
+      $('#recTip').textContent = '';
+      var chunks = capturer ? capturer.getChunks() : [];
       if (capturer) { capturer.stop(); capturer = null; }
       if (localStream) { try { localStream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {} localStream = null; }
-      if (localAudioCtx) { try { localAudioCtx.close(); } catch (e) {} localAudioCtx = null; }
-      if (dur < 550) { label.textContent = '太短了，再按一次'; return; }
-      $('#recTip').textContent = '';
+      if (localAudioCtx) { try { localAudioCtx.close(); } catch (e) {} pcmWorkletReady.delete(localAudioCtx); localAudioCtx = null; }
+      state = 'idle';
+      // 用户主动按下停止：即使 chunks 为空也允许进入编辑器（避免 worklet 异步延迟导致的误判）
+      if (!chunks.length && !userInitiated) { label.textContent = '太短了，再按一次'; setTimeout(function () { label.textContent = opt.hold || '按下，说给 TA 听'; }, 2000); return; }
       editor(mockASR(opt.asr));
     }
-    btn.addEventListener('pointerdown', start);
-    btn.addEventListener('pointerup', stop);
-    btn.addEventListener('pointerleave', stop);
-    btn.addEventListener('pointercancel', stop);
+
+    function onBtnDown(e) {
+      e.preventDefault();
+      if (state === 'idle') {
+        state = 'requesting';
+        btn.classList.add('is-holding');
+        recOverlay.hidden = false;
+        $('#recTip').textContent = '再次按下结束';
+        requestMic();
+      } else if (state === 'recording') {
+        doStop(true);
+      }
+      // requesting 状态下按了无效，不做任何事
+    }
+
+    btn.addEventListener('pointerdown', onBtnDown);
+    // 只阻止默认行为，不主动停止
+    btn.addEventListener('pointerup', function (e) { e.preventDefault(); });
+    btn.addEventListener('pointerleave', function (e) { e.preventDefault(); });
+    btn.addEventListener('pointercancel', function (e) { e.preventDefault(); });
     alt.addEventListener('click', function () { editor(''); });
 
     // 发送前编辑
@@ -1175,8 +1261,8 @@
         var voiceBtn = $('#journeyVoice');
         var stream = null;
         var pcmChunks = [];
-        var ended = false;
-        var starting = false;
+        // 状态机：'idle' | 'requesting' | 'recording'
+        var state = 'idle';
         var audioContext = null;
         var capturer = null;
         var quietSince = 0;
@@ -1194,32 +1280,14 @@
             stream = null;
           }
           stopPauseMonitor();
-          if (audioContext) { try { audioContext.close(); } catch (e) {} audioContext = null; }
+          if (audioContext) { try { audioContext.close(); } catch (e) {} pcmWorkletReady.delete(audioContext); audioContext = null; }
           voiceBtn.disabled = false;
-          starting = false;
         }
 
-        function start(e) {
-          e.preventDefault();
-          if (starting) return;
-          if (e.pointerId !== undefined && voiceBtn.setPointerCapture) {
-            try { voiceBtn.setPointerCapture(e.pointerId); } catch (ignored) {}
-          }
-          starting = true;
-          pcmChunks = [];
-          ended = false;
-          editUIShown = false;
-          journeyVoiceExample.hidden = true;
-          journeyVoiceExample.textContent = '';
-          journeyVoiceHint.hidden = true;
-          stopVoiceQuoteCarousel();
-          voiceBtn.classList.add('is-holding');
-          recOverlay.hidden = true;
-          $('#journeyVoiceLabel').textContent = '正在听…说完自动结束';
-
+        function requestMic() {
+          state = 'requesting';
           if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            ended = true;
-            starting = false;
+            state = 'idle';
             voiceBtn.classList.remove('is-holding');
             journeyVoiceExample.hidden = true;
             journeyVoiceExample.textContent = '';
@@ -1227,21 +1295,20 @@
             startVoiceQuoteCarousel();
             recOverlay.hidden = true;
             $('#journeyVoiceLabel').textContent = '当前设备不支持录音，请再试一次';
+            setTimeout(function () { $('#journeyVoiceLabel').textContent = GUIDE_TEXT.name; }, 3000);
             return;
           }
           navigator.mediaDevices.getUserMedia({ audio: true })
             .then(function (s) {
-              starting = false;
-              if (ended) { s.getTracks().forEach(function (t) { t.stop(); }); return; }
+              if (state !== 'requesting') { s.getTracks().forEach(function (t) { t.stop(); }); return; }
               stream = s;
-              // AudioContext 在用户手势回调内创建，iOS 要求如此
               audioContext = new (window.AudioContext || window.webkitAudioContext)();
               capturer = startPcmCapture({
                 stream: s,
                 ctx: audioContext,
                 onSilence: function (silentMs) {
-                  if (silentMs >= 5000) { doStop(null); return; }
-                  if (silentMs >= 3500) {
+                  if (state === 'recording' && silentMs >= 5000) { doStop(false); return; }
+                  if (state === 'recording' && silentMs >= 3500) {
                     var pause = $('#recPause');
                     pause.textContent = pauseIndex++ % 2 ? '然后呢？' : '嗯……';
                     pause.classList.add('is-visible');
@@ -1256,53 +1323,59 @@
                 }
               });
               voiceBtn.disabled = false;
+              state = 'recording';
             })
             .catch(function () {
-              ended = true;
-              releaseMic();
-              voiceBtn.classList.remove('is-holding');
-              journeyVoiceExample.hidden = true;
-              journeyVoiceExample.textContent = '';
-              journeyVoiceHint.hidden = false;
-              startVoiceQuoteCarousel();
-              $('#journeyVoiceLabel').textContent = '请允许麦克风权限';
-              setTimeout(function () { $('#journeyVoiceLabel').textContent = GUIDE_TEXT.name; }, 3000);
+              if (state === 'requesting') {
+                state = 'idle';
+                releaseMic();
+                voiceBtn.classList.remove('is-holding');
+                journeyVoiceExample.hidden = true;
+                journeyVoiceExample.textContent = '';
+                journeyVoiceHint.hidden = false;
+                startVoiceQuoteCarousel();
+                recOverlay.hidden = true;
+                $('#journeyVoiceLabel').textContent = '请允许麦克风权限';
+                setTimeout(function () { $('#journeyVoiceLabel').textContent = GUIDE_TEXT.name; }, 3000);
+              }
             });
         }
 
-        function doStop(event) {
-          if (ended) { releaseMic(); return; }
-          ended = true;
-
+        function doStop(userInitiated) {
           voiceBtn.classList.remove('is-holding');
-          if (event && event.pointerId !== undefined && voiceBtn.releasePointerCapture) {
-            try { voiceBtn.releasePointerCapture(event.pointerId); } catch (ignored) {}
-          }
+          recOverlay.hidden = true;
+          $('#recTip').textContent = '';
           journeyVoiceExample.hidden = true;
           journeyVoiceExample.textContent = '';
           journeyVoiceHint.hidden = true;
           stopVoiceQuoteCarousel();
-          recOverlay.hidden = true;
 
-          if (!pcmChunks.length) {
+          // 关键：直接从 capturer 同步读取 chunks（onStop 回调要等 releaseMic 才触发，那时已经晚了）
+          var chunks = capturer && capturer.getChunks ? capturer.getChunks() : [];
+          pcmChunks = chunks;
+
+          // 用户主动按下停止 → 即使 chunks 为空也允许进入编辑器（避免 worklet 异步延迟导致的误判）
+          if (!chunks.length && !userInitiated) {
             releaseMic();
+            state = 'idle';
             $('#journeyVoiceLabel').textContent = '太短了，再按一次';
             setTimeout(function () { $('#journeyVoiceLabel').textContent = GUIDE_TEXT.name; }, 2000);
             return;
           }
 
-          // 合并 PCM chunks（每个 chunk 已经是 16kHz mono Int16）
           var totalBytes = 0;
-          for (var c = 0; c < pcmChunks.length; c++) totalBytes += pcmChunks[c].byteLength;
+          for (var c = 0; c < chunks.length; c++) totalBytes += chunks[c].byteLength;
+          if (window.console && console.log) console.log('[VOICE] chunks=', chunks.length, 'totalBytes=', totalBytes, 'duration~', (totalBytes / 32000).toFixed(2), 's');
           var pcmBuf = new ArrayBuffer(totalBytes);
           var view = new Uint8Array(pcmBuf);
           var off = 0;
-          for (var c2 = 0; c2 < pcmChunks.length; c2++) {
-            var chunk = new Uint8Array(pcmChunks[c2]);
+          for (var c2 = 0; c2 < chunks.length; c2++) {
+            var chunk = new Uint8Array(chunks[c2]);
             view.set(chunk, off); off += chunk.byteLength;
           }
 
           releaseMic();
+          state = 'idle';
           $('#journeyVoiceLabel').textContent = '正在转写…';
           recognizeByTencentASR(pcmBuf, function (text, isFinal) {
             if (!text || !text.trim()) return;
@@ -1316,8 +1389,8 @@
           }, function (errMsg) {
             editUIShown = false;
             voiceBtn.disabled = false;
-            // errMsg === null 表示腾讯云凭证未配置，降级为 mock
-            if (errMsg === null) {
+            if (errMsg === null || errMsg === '没有识别到内容') {
+              // 未配置凭证 或 ASR 没识别出来 → 都降级为 mock，保证用户能继续走流程
               var mockText = mockASR('day');
               journeyVoiceExample.hidden = false;
               journeyVoiceExample.textContent = mockText;
@@ -1330,11 +1403,96 @@
           });
         }
 
-        // 引导提示：告诉用户该说什么
+        // 引导提示 + 改用文字按钮
         $('#journeyVoiceLabel').textContent = GUIDE_TEXT.name;
-        voiceBtn.addEventListener('pointerdown', start);
-        voiceBtn.addEventListener('pointerup', doStop);
-        voiceBtn.addEventListener('pointercancel', doStop);
+        var textInputBtn = document.createElement('button');
+        textInputBtn.type = 'button';
+        textInputBtn.className = 'ghost-btn';
+        textInputBtn.style.marginTop = '6px';
+        textInputBtn.textContent = '改用文字';
+        textInputBtn.addEventListener('click', function () {
+          if (state === 'recording') doStop(true);
+          editorForJourneyVoice('');
+        });
+        journeyVoiceHint.parentNode.insertBefore(textInputBtn, journeyVoiceHint.nextSibling);
+
+        function onBtnDown(e) {
+          e.preventDefault();
+          if (state === 'idle') {
+            pcmChunks = [];
+            editUIShown = false;
+            journeyVoiceExample.hidden = true;
+            journeyVoiceExample.textContent = '';
+            journeyVoiceHint.hidden = true;
+            stopVoiceQuoteCarousel();
+            voiceBtn.classList.add('is-holding');
+            recOverlay.hidden = false;
+            $('#recPause').classList.remove('is-visible');
+            $('#journeyVoiceLabel').textContent = '再次按下结束';
+            $('#recTip').textContent = '再次按下结束';
+            requestMic();
+          } else if (state === 'recording') {
+            doStop(true);
+          }
+          // requesting 状态下按了无效
+        }
+        voiceBtn.addEventListener('pointerdown', onBtnDown);
+        voiceBtn.addEventListener('pointerup', function (e) { e.preventDefault(); });
+        voiceBtn.addEventListener('pointercancel', function (e) { e.preventDefault(); });
+
+        function editorForJourneyVoice(text) {
+          editUIShown = true;
+          journeyVoiceHint.hidden = true;
+          voiceBtn.style.display = 'none';
+          textInputBtn.style.display = 'none';
+          var field = document.createElement('div');
+          field.className = 'field';
+          field.style.marginTop = '10px';
+          var ta = document.createElement('textarea');
+          ta.rows = 2;
+          ta.placeholder = '写下来也可以…';
+          ta.value = text;
+          var send = document.createElement('button');
+          send.type = 'button';
+          send.className = 'icon-btn';
+          send.setAttribute('aria-label', '发送');
+          send.innerHTML = '<svg viewBox="0 0 24 24"><use href="#send"></use></svg>';
+          field.appendChild(ta); field.appendChild(send);
+          journeyVoiceHint.parentNode.insertBefore(field, textInputBtn);
+
+          var row = document.createElement('div');
+          row.className = 'slot-row';
+          row.style.justifyContent = 'center';
+          var again = document.createElement('button');
+          again.type = 'button';
+          again.className = 'ghost-btn';
+          again.textContent = '重新说';
+          again.addEventListener('click', function () {
+            field.remove(); row.remove();
+            voiceBtn.style.display = ''; textInputBtn.style.display = '';
+            editUIShown = false;
+            state = 'idle';
+            $('#journeyVoiceLabel').textContent = GUIDE_TEXT.name;
+          });
+          row.appendChild(again);
+          journeyVoiceHint.parentNode.insertBefore(row, textInputBtn);
+
+          ta.focus();
+          ta.addEventListener('input', function () {
+            ta.style.height = 'auto'; ta.style.height = Math.min(96, ta.scrollHeight) + 'px';
+          });
+          function submit() {
+            var v = ta.value.trim();
+            if (!v) { ta.focus(); return; }
+            field.remove(); row.remove();
+            voiceBtn.style.display = ''; textInputBtn.style.display = '';
+            processVoiceInput(v);
+          }
+          send.addEventListener('click', submit);
+          ta.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
+          });
+        }
       })();
 
       function typeVoiceText(text, done) {

@@ -66,7 +66,8 @@ def build_asr_connect_url(voice_id: str = None) -> dict:
         "expired": expired,
         "nonce": timestamp,
         "voice_format": ASR_VOICE_FORMAT,
-        "needvad": 1,
+        # needvad 不传：官方 SDK 默认行为，服务端持续识别整段音频。
+        # 若传 needvad=1，服务端 VAD 检测不到语音就静默关闭，导致前端拿到空结果。
     }
 
     # 第一步：字典序排序后拼签名原文（不含 wss://）
