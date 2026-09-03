@@ -15,6 +15,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 from backend_app.routes import router
 from backend_app.database import init_db
 import os
@@ -69,6 +70,19 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# 允许来自公网的请求访问 loopback/private 网络（Chrome Private Network Access）。
+# 当 https 公网前端需要调 localhost 后端时，浏览器 PNA 校验需要这个响应头。
+# 本中间件加载在 CORSMiddleware 之后（最外层），对响应统一补 PNA 头。
+class PrivateNetworkAccessMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["Access-Control-Allow-Private-Network"] = "true"
+        return response
+
+
+app.add_middleware(PrivateNetworkAccessMiddleware)
 
 # Initialize database on startup
 @app.on_event("startup")

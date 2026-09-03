@@ -162,7 +162,13 @@
   <p class="stage-note">键盘 <kbd>1</kbd> 召回 · <kbd>2</kbd> 记忆旅程 · <kbd>3</kbd> 家园 · <kbd>4</kbd> 对话 · <kbd>R</kbd> 重来</p>
 </div>
 
-<script>window.MEMORY_HOME_API = 'http://localhost:8001/api/v1';</script>
+<!--
+  后端地址优先级：
+    1. 显式设置 window.MEMORY_HOME_API（部署时通过构建/Caddy/反代注入）
+    2. 与前端同源的 /api/v1（推荐用 Caddy/nginx 反代，避免 CORS 与 PNA）
+    3. 仅本地开发兜底用 http://localhost:8001/api/v1
+-->
+<script>window.MEMORY_HOME_API = window.MEMORY_HOME_API || ((location.protocol === 'https:' || location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') ? '/api/v1' : 'http://localhost:8001/api/v1');</script>
 <script src="app.js"></script>
 </body>
 </html>

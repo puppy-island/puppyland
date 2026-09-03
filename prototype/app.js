@@ -159,8 +159,14 @@
      1. 状态（对应 PRD §7 数据与状态）
      ──────────────────────────────────────────────────────────────────── */
   var KEY = 'memoryhome.guest.v1';   // Guest Session：当前设备永久保存
-  // 后端地址可通过 window.MEMORY_HOME_API 覆盖；本地开发默认 FastAPI 端口 8001。
-  var API_BASE = (window.MEMORY_HOME_API || 'http://localhost:8001/api/v1').replace(/\/$/, '');
+  // 后端地址优先级：
+  //   1) window.MEMORY_HOME_API（部署时显式注入）
+  //   2) 与前端同源的相对路径 /api/v1（推荐用反代，避免 CORS/PNA）
+  //   3) 仅本地开发兜底用 http://localhost:8001/api/v1
+  var _defaultApi = (location.protocol === 'https:' || (location.hostname !== 'localhost' && location.hostname !== '127.0.0.1'))
+    ? '/api/v1'
+    : 'http://localhost:8001/api/v1';
+  var API_BASE = (window.MEMORY_HOME_API || _defaultApi).replace(/\/$/, '');
   var API_ORIGIN = API_BASE.replace(/\/api\/v1\/?$/, '');
 
   var S = {
