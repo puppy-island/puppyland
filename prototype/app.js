@@ -2084,6 +2084,11 @@
     if (jump[e.key]) goto(jump[e.key]);
     if (e.key === 'r' || e.key === 'R') reset();
   });
+  // 移动端没有键盘，用按钮代替 R 键：journey 上传照片阶段与 home 家园阶段各放一个「重来」
+  var journeyResetBtn = $('#journeyResetBtn');
+  if (journeyResetBtn) journeyResetBtn.addEventListener('click', function () { reset(); });
+  var homeResetBtn = $('#homeReset');
+  if (homeResetBtn) homeResetBtn.addEventListener('click', function () { reset(); });
 
   window.__mh = { S: S, goto: goto, reset: reset, addMemory: addMemory, addPaw: addPaw };  // 调试用
 

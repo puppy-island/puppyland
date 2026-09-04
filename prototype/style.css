@@ -450,6 +450,7 @@ body{
 .journey-confirm{ display:flex; flex-direction:column; align-items:center; gap:9px; }
 .journey-card.is-confirming .journey-confirm{ margin-top:31vh; flex-direction:row; justify-content:center; align-items:center; gap:12px; }
 .journey-card.is-confirming .journey-confirm-btn{ margin-top:0; }
+.journey-confirm-actions{ display:flex; align-items:center; justify-content:center; gap:10px; }
 .journey-confirm-pet{ width:168px; height:168px; display:grid; place-items:center; margin:0 auto 4px; }
 .journey-confirm-pet img{ display:block; width:100%; height:auto; filter:drop-shadow(0 13px 16px rgba(81,66,48,.2)); }
 .journey-confirm-note{ margin:0; color:#665D54; font-family:var(--font-story); font-size:14px; }
@@ -463,6 +464,8 @@ body{
 .journey-confirm-pet img.is-regenerating{ opacity:.42; filter:blur(7px) drop-shadow(0 13px 16px rgba(81,66,48,.2)); animation:journeyRegenerate 1.1s ease-in-out infinite; }
 @keyframes journeyRegenerate{ 50%{ opacity:.78; transform:scale(1.035); } }
 .journey-confirm-btn{ width:112px; height:40px; box-sizing:border-box; margin-top:4px; padding:0; font-size:12px; }
+.journey-reset-btn{ width:96px; height:40px; box-sizing:border-box; margin-top:4px; padding:0; font-size:12px; color:#9A5A4A; border-color:rgba(154,90,74,.34); }
+.journey-reset-btn:hover{ background:rgba(255,255,255,.4); color:#83382F; border-color:rgba(154,90,74,.5); }
 
 /* ── 房间（场景 1 / 2） ───────────────────────────── */
 .room{                              /* 参考图里没有地平线：一整片牛皮纸，物件靠影子落地 */
@@ -720,6 +723,17 @@ body{
   position:absolute; z-index:3; padding:0; border:0; cursor:pointer; background:transparent;
   border-radius:50%; -webkit-tap-highlight-color:transparent;
 }
+.home-reset{
+  position:absolute; z-index:7; top:calc(14px + env(safe-area-inset-top)); right:14px;
+  padding:7px 14px; border:1px solid rgba(154,90,74,.4); border-radius:999px;
+  background:rgba(255,249,234,.78); color:#9A5A4A;
+  font-family:var(--font-ui); font-size:12px; letter-spacing:.08em;
+  cursor:pointer; -webkit-tap-highlight-color:transparent;
+  box-shadow:0 6px 14px -10px rgba(90,60,35,.55);
+  transition:background .25s, color .25s, border-color .25s, transform .2s var(--ease);
+}
+.home-reset:hover{ background:rgba(255,249,234,.95); color:#83382F; border-color:rgba(154,90,74,.6); transform:translateY(-1px); }
+.home-reset:active{ transform:translateY(0); }
 .home-hotspot::after{ content:""; position:absolute; inset:-8px; border:1px solid rgba(255,238,180,.82); border-radius:inherit; opacity:0; transform:scale(.72); box-shadow:0 0 18px rgba(244,207,112,.58); pointer-events:none; }
 .home-hotspot.is-reacting::after{ animation:home-object-glow .72s var(--ease) both; }
 @keyframes home-object-glow{ 0%{ opacity:0; transform:scale(.72); } 38%{ opacity:1; } 100%{ opacity:0; transform:scale(1.16); } }
@@ -807,7 +821,7 @@ body{
 .c-sub{ font-size:11.5px; letter-spacing:.1em; color:var(--ink-soft); }
 
 .companion-pet{
-  position:absolute; z-index:5; right:12px; bottom:78px; left:auto; width:84px; margin:0;
+  position:absolute; z-index:5; right:18px; bottom:78px; left:auto; width:84px; margin:0;
   filter:drop-shadow(0 9px 10px rgba(74,50,31,.18)); pointer-events:none;
   transition:transform .45s var(--ease), filter 1.1s var(--ease);
 }

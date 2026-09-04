@@ -77,7 +77,10 @@
               <span>补充照片</span>
             </label>
           </div>
-          <button class="ghost-btn journey-confirm-btn" id="journeyConfirmBtn" type="button">跳过</button>
+          <div class="journey-confirm-actions">
+            <button class="ghost-btn journey-reset-btn" id="journeyResetBtn" type="button" aria-label="重来，从最开始再来一次">重来</button>
+            <button class="ghost-btn journey-confirm-btn" id="journeyConfirmBtn" type="button">跳过</button>
+          </div>
         </div>
       </div>
     </section>
@@ -107,6 +110,7 @@
     <section class="scene home-hub" data-scene="home" aria-label="小狗的家">
       <div class="home-art" aria-hidden="true"></div>
       <div class="home-night" aria-hidden="true"></div>
+      <button class="home-reset" id="homeReset" type="button" aria-label="重来，从最开始再来一次">重来</button>
       <button class="home-hotspot home-lamp" id="homeLamp" type="button" aria-label="关灯，让小狗休息"></button>
       <button class="home-hotspot home-mailbox" id="homeMailbox" type="button" aria-label="打开信箱，阅读今天的来信"></button>
       <button class="home-hotspot home-bowl" id="homeBowl" type="button" aria-label="点击饭盆"></button>
