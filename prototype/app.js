@@ -1908,7 +1908,6 @@
         img.alt = '小狗陪在身边';
         img.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain;pointer-events:none;';
         petEl.style.visibility = 'hidden';
-        petC.style.position = 'relative';
         petC.appendChild(img);
       }
       petEl.src = 'assets/pet-idle.webp'; // 保留 src 避免 broken icon
