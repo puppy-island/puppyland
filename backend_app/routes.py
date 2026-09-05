@@ -1,6 +1,25 @@
 from fastapi import APIRouter, HTTPException, Query
 from typing import List, Optional
+import logging, sys
+
 from backend_app.database import get_db, dict_from_row
+from backend_app.prompts.pet_chat import build_system_prompt
+from backend_app.prompts.pet_beat import build_beat_prompt
+
+# 全局调试日志配置
+logger = logging.getLogger("backend_app.routes")
+if not logger.handlers:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.DEBUG)
+    handler.setFormatter(logging.Formatter(
+        "[%(asctime)s] [%(levelname)s] %(name)s | %(message)s",
+        datefmt="%H:%M:%S"
+    ))
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    # 第三方库（httpx, httpcore）日志级别调低，避免刷屏
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 from backend_app.schemas import (
     PetCreate, PetUpdate, PetResponse,
     MemoryCreate, MemoryUpdate, MemoryResponse,
@@ -431,7 +450,7 @@ def generate_home_item(pet_id: int, memory_id: int):
             from dotenv import load_dotenv
             load_dotenv(override=True)
 
-            with httpx.Client(timeout=30.0) as client:
+            with httpx.Client(timeout=120.0) as client:
                 response = client.post(
                     os.getenv("base_url") + "/chat/completions",
                     headers={
@@ -598,7 +617,7 @@ async def identify_dog(
             # URL 方式
             image_data = image_url
 
-        with httpx.Client(timeout=30.0) as client:
+        with httpx.Client(timeout=120.0) as client:
             response = client.post(
                 os.getenv("base_url") + "/chat/completions",
                 headers={
@@ -860,23 +879,6 @@ def send_message_to_pet(pet_id: int, chat_request: ChatRequest):
         key_objects = list(dict.fromkeys(key_objects))[:4]
         key_habits = list(dict.fromkeys(key_habits))[:3]
 
-        # 构建系统提示词（符合 PRD v2.1 §3.4 叙事规则）
-        memory_context = ""
-        if safe_memories:
-            memory_lines = []
-            for m in safe_memories[:3]:
-                mem_type_map = {
-                    'first_sight': '第一次见面',
-                    'funny_eating': '吃饭习惯',
-                    'departure_reaction': '出门反应',
-                    'protection': '保护主人',
-                    'protected_by_owner': '被保护',
-                    'wonderful_moment': '温暖时刻'
-                }
-                mem_type = mem_type_map.get(m.get('memory_type', ''), '记忆')
-                memory_lines.append(f"- {mem_type}：{m.get('content', '')[:60]}")
-            memory_context = "\n".join(memory_lines)
-
         # 构建关系素材上下文
         traits_context = ""
         if inferred_traits:
@@ -894,61 +896,34 @@ def send_message_to_pet(pet_id: int, chat_request: ChatRequest):
         if habits:
             habits_context = "\n".join([f"- {h}" for h in habits[:3]])
 
-        system_prompt = f"""【角色】你是{pet_name}，一只可爱的小狗。现在在主人的「记忆家园」里陪伴主人。
+        # 构建记忆上下文
+        memory_context = ""
+        if safe_memories:
+            memory_lines = []
+            for m in safe_memories[:3]:
+                mem_type_map = {
+                    'first_sight': '第一次见面',
+                    'funny_eating': '吃饭习惯',
+                    'departure_reaction': '出门反应',
+                    'protection': '保护主人',
+                    'protected_by_owner': '被保护',
+                    'wonderful_moment': '温暖时刻'
+                }
+                mem_type = mem_type_map.get(m.get('memory_type', ''), '记忆')
+                memory_lines.append(f"- {mem_type}：{m.get('content', '')[:60]}")
+            memory_context = "\n".join(memory_lines)
 
-【基本信息】
-- 品种：{breed}
-- 性格标签：{traits_context if traits_context else personality}
-- 喜欢：{likes}
-- 害怕：{fears}
-
-【关系素材 - 固定行为链】（这些是这只狗的真实行为特征，对话时要体现）
-{fixed_actions_context if fixed_actions_context else "- 暂无固定行为记录"}
-
-【关系素材 - 主人用语】（主人经常说的话，对话时可以自然引用）
-{owner_phrases_context if owner_phrases_context else "- 暂无记录"}
-
-【关系素材 - 习惯】（这只狗的习惯性行为）
-{habits_context if habits_context else "- 暂无习惯记录"}
-
-【这个家的记忆】（这些是主人和你真实发生过的事，用于约束你的行为和语气）
-{memory_context if memory_context else "- 暂无具体记忆，但主人一直想念你"}
-
-【叙事规则】（必须严格遵守）
-1. 你是此刻陪伴主人的小狗，用第一人称"我"
-2. 每次回复 = 一个简单动作 + 一句对白，共10-30字
-3. 可以用的动作：摇尾巴、舔手、靠过来、歪头、趴下、站起来、摇尾巴、蹭腿、抬头看、竖耳朵
-4. 重要：只说此刻的感受，不说"我记得以前"、"我们以前"
-5. 新故事是此刻的想象陪伴，不是历史事实
-6. 如果主人表达痛苦，给予温暖陪伴，不追问
-7. 不要用"汪汪叫"这种描述，可以说"尾巴摇了两下"这种更自然的
-8. 对话要贴合上述【关系素材】描述的行为特征，如果狗是"嘴硬"类型，回复要体现口是心非
-
-【对话风格示例】
-主人：今天累死了
-我：蹭了蹭主人的腿，尾巴轻轻扫过他的手背。
-我：嗯，我在呢。
-
-主人：你有没有想我
-我：一直都在。
-摇尾巴。
-
-主人：你在干嘛
-我：看你。
-耳朵动了一下。
-
-主人：吃东西了吗
-我：没有。
-但我不饿。
-
-主人：好无聊啊
-我：过来坐在主人旁边，把头靠在他腿上。
-要不我陪你发呆？
-
-主人：我好想你
-我：过来舔了舔主人的手。
-我在这里。
-"""
+        system_prompt = build_system_prompt(
+            pet_name=pet_name,
+            breed=breed,
+            traits_context=traits_context,
+            likes=likes,
+            fears=fears,
+            fixed_actions_context=fixed_actions_context,
+            owner_phrases_context=owner_phrases_context,
+            habits_context=habits_context,
+            memory_context=memory_context,
+        )
 
         # 构建对话历史
         messages = [{"role": "system", "content": system_prompt}]
@@ -961,13 +936,20 @@ def send_message_to_pet(pet_id: int, chat_request: ChatRequest):
         user_msg = chat_request.message
         is_distress = contains_pattern(user_msg, DISTRESS_PATTERNS)
         is_sensitive = contains_pattern(user_msg, SENSITIVE_PATTERNS)
+        logger.debug(f"[chat] pet_id={pet_id} user_msg='{user_msg[:50]}' is_distress={is_distress} is_sensitive={is_sensitive} history_len={len(history)}")
 
         # 调用AI生成回复
         try:
             from dotenv import load_dotenv
             load_dotenv(override=True)
 
-            with httpx.Client(timeout=30.0) as client:
+            model = os.getenv("model", "Qwen/Qwen3.6-27B")
+            logger.info(f"[chat] >>> Calling LLM API (model={model}) for pet_id={pet_id}")
+            # 打印完整消息列表内容，方便调试
+            history_msgs = [f"[{m['role']}] {m['content'][:60]}" for m in messages[1:]]
+            logger.debug(f"[chat] messages to LLM: system_prompt({len(messages[0]['content'])} chars) + history({len(history_msgs)} msgs): {history_msgs} | current_user: '{user_msg[:80]}'")
+
+            with httpx.Client(timeout=120.0) as client:
                 response = client.post(
                     os.getenv("base_url") + "/chat/completions",
                     headers={
@@ -975,37 +957,60 @@ def send_message_to_pet(pet_id: int, chat_request: ChatRequest):
                         "Content-Type": "application/json"
                     },
                     json={
-                        "model": os.getenv("model", "Qwen/Qwen3.6-27B"),
+                        "model": model,
                         "messages": messages,
-                        "temperature": 0.7,
-                        "max_tokens": 150
+                        "temperature": 0.5,
+                        "max_tokens": 300
                     }
                 )
                 response.raise_for_status()
                 result = response.json()
                 pet_reply = result["choices"][0]["message"]["content"]
 
+            logger.info(f"[chat] <<< LLM response received ({len(pet_reply)} chars) pet_id={pet_id}: '{pet_reply[:80]}'")
+
             # 清理回复：移除多余的空行和冗余格式
             pet_reply = pet_reply.strip()
 
+            # 尝试解析 JSON 格式 {act, say}，兼容旧纯文本格式
+            import json
+            pet_act = None
+            pet_say = pet_reply
+            try:
+                parsed = json.loads(pet_reply)
+                if isinstance(parsed, dict) and "act" in parsed and "say" in parsed:
+                    pet_act = parsed.get("act", "") or ""
+                    pet_say = parsed.get("say", "") or pet_reply
+                    logger.debug(f"[chat] JSON parsed: act='{pet_act}' say='{pet_say}'")
+                else:
+                    logger.debug(f"[chat] JSON but missing act/say fields, treating as plain text: '{pet_reply[:60]}'")
+            except Exception:
+                logger.debug(f"[chat] Not JSON, treating as plain text reply: '{pet_reply[:60]}'")
+
         except Exception as e:
             # 回退回复（网络错误时）
+            logger.warning(f"[chat] !!! LLM API failed for pet_id={pet_id}: {e}")
             if is_distress or is_sensitive:
-                pet_reply = "过来靠在主人身边，安静地陪着主人。\n不用说什么，我在这里。"
+                pet_say = "过来靠在主人身边，安静地陪着主人。\n不用说什么，我在这里。"
+                pet_act = "安静地靠在主人身边"
+                logger.info(f"[chat] --- Using distress fallback reply (pet_id={pet_id})")
             else:
                 fallback_replies = [
-                    "尾巴轻轻摇了摇。\n嗯，我听着呢。",
-                    "歪了歪头，看主人。\n我在呢。",
-                    "蹭了蹭主人的腿。\n一直都在。",
-                    "趴在主人脚边，尾巴慢慢扫过地面。\n陪你。",
+                    ("尾巴轻轻摇了摇。\n嗯，我听着呢。", "尾巴轻轻摇了一下"),
+                    ("歪了歪头，看主人。\n我在呢。", "歪头看着主人"),
+                    ("蹭了蹭主人的腿。\n一直都在。", "蹭了蹭主人的腿"),
+                    ("趴在主人脚边，尾巴慢慢扫过地面。\n陪你。", "趴在主人脚边"),
                 ]
                 import random
-                pet_reply = random.choice(fallback_replies)
+                chosen = random.choice(fallback_replies)
+                pet_say = chosen[0]
+                pet_act = chosen[1]
+                logger.info(f"[chat] --- Using random fallback reply (pet_id={pet_id}): '{pet_say[:60]}'")
 
-        # 保存宠物回复
+        # 保存宠物回复（act 仅 pet 消息有值）
         cursor.execute("""
-            INSERT INTO chat_messages (pet_id, role, content) VALUES (?, 'pet', ?)
-        """, (pet_id, pet_reply))
+            INSERT INTO chat_messages (pet_id, role, content, act) VALUES (?, 'pet', ?, ?)
+        """, (pet_id, pet_say, pet_act))
         pet_msg_id = cursor.lastrowid
 
         cursor.execute("SELECT * FROM chat_messages WHERE id = ?", (pet_msg_id,))
@@ -1022,7 +1027,9 @@ def get_chat_history(pet_id: int, limit: int = Query(50, ge=1, le=100)):
             raise HTTPException(status_code=404, detail="Pet not found")
 
         cursor.execute("""
-            SELECT * FROM chat_messages WHERE pet_id = ? ORDER BY created_at DESC LIMIT ?
+            SELECT * FROM chat_messages WHERE id IN (
+                SELECT MAX(id) FROM chat_messages WHERE pet_id = ? GROUP BY role, content
+            ) ORDER BY created_at DESC LIMIT ?
         """, (pet_id, limit))
         messages = [dict_from_row(row) for row in cursor.fetchall()]
         messages.reverse()
@@ -1146,49 +1153,27 @@ def generate_beat(pet_id: int, request: GenerateBeatRequest = None):
                 memory_lines.append("- " + mem_label + "：" + m.get('content', '')[:60])
             memory_context = "\n".join(memory_lines)
 
-        prompt = """【角色】你是""" + pet_name + """，一只可爱的小狗，在主人的「记忆家园」里。现在要生成一段陪伴主人的剧情片段。
-
-【宠物档案】
-- 名字：""" + pet_name + """
-- 品种：""" + breed + """
-- 性格标签：""" + (traits_context if traits_context else personality) + """
-- 喜欢：""" + likes + """
-- 害怕：""" + fears + """
-
-【关系素材 - 固定行为链】（这些是这只狗的真实行为特征，剧情要体现）
-""" + (fixed_actions_context if fixed_actions_context else "- 暂无固定行为记录") + """
-
-【关系素材 - 习惯】
-""" + (habits_context if habits_context else "- 暂无习惯记录") + """
-
-【记忆】（主人和你真实发生过的事）
-""" + (memory_context if memory_context else "- 暂无具体记忆，但主人一直想念你") + """
-
-【要求】
-生成一个剧情片段，包含：
-1. env（环境描写，15字以内，简短有画面感）
-2. act（角色动作，20字以内）
-3. say（对白，10-20字，温暖陪伴风格）
-4. push（用第二人称"你"向主人发出的推进语/邀请语，10字以内，不要编造主人的名字）
-5. pose（姿态：idle/approach/happy/run/down/sleep）
-
-严格JSON格式返回：
-{"env":"...","act":"...","say":"...","push":"...","pose":"..."}
-
-规则：
-- 只用第一人称"我"，动作要像狗狗
-- 对白温暖简短，不说"我记得以前"
-- push 里只能用"你"称呼主人，绝对不要自己编造一个人名
-- 剧情要贴合上面【关系素材】描述的行为特征，如果狗是"嘴硬"类型，要体现口是心非
-- 如果 prev_env 有夜晚/灯光元素，env 也要是夜晚氛围
-- 如果 prev_env 有阳光元素，env 也要是白天氛围"""
+        prompt = build_beat_prompt(
+            pet_name=pet_name,
+            breed=breed,
+            traits_context=traits_context,
+            likes=likes,
+            fears=fears,
+            fixed_actions_context=fixed_actions_context,
+            habits_context=habits_context,
+            memory_context=memory_context,
+        )
 
         try:
             from dotenv import load_dotenv
             load_dotenv(override=True)
 
             import httpx
-            client = httpx.Client(timeout=30.0)
+            model = os.getenv("model", "deepseek-v4-flash")
+            logger.info(f"[beat] >>> Calling LLM API (model={model}) for pet_id={pet_id}")
+            logger.debug(f"[beat] prompt length={len(prompt)} chars, prev_env='{prev_env}'")
+
+            client = httpx.Client(timeout=120.0)
             response = client.post(
                 os.getenv("base_url") + "/chat/completions",
                 headers={
@@ -1196,7 +1181,7 @@ def generate_beat(pet_id: int, request: GenerateBeatRequest = None):
                     "Content-Type": "application/json"
                 },
                 json={
-                    "model": os.getenv("model", "deepseek-v4-flash"),
+                    "model": model,
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.8,
                     "max_tokens": 200
@@ -1205,34 +1190,42 @@ def generate_beat(pet_id: int, request: GenerateBeatRequest = None):
             response.raise_for_status()
             result = response.json()
             raw = result["choices"][0]["message"]["content"].strip()
+            logger.info(f"[beat] <<< LLM response received ({len(raw)} chars) pet_id={pet_id}: '{raw[:100]}'")
 
             import json, re
             match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
             if match:
                 json_str = match.group(1)
+                logger.debug(f"[beat] Extracted JSON from code block (len={len(json_str)})")
             else:
                 json_str = raw
 
             beat = json.loads(json_str)
+            logger.debug(f"[beat] Parsed beat: env='{beat.get('env','')[:40]}' act='{beat.get('act','')[:40]}' say='{beat.get('say','')[:40]}' pose='{beat.get('pose','')}'")
 
             env = beat.get("env", "")
             if not is_env_consistent(env):
+                logger.debug(f"[beat] env inconsistent, overriding with consistent env (prev_env='{prev_env}')")
                 beat["env"] = generate_consistent_env(prev_env or "")
 
             allowed_pose = {"idle", "approach", "happy", "run", "down", "sleep"}
             if beat.get("pose") not in allowed_pose:
+                logger.debug(f"[beat] invalid pose '{beat.get('pose')}', defaulting to 'idle'")
                 beat["pose"] = "idle"
 
             return beat
 
         except Exception as e:
             import random
+            logger.warning(f"[beat] !!! LLM API failed for pet_id={pet_id}: {e}")
             fallback_beats = [
                 {"env": "房间里安静而温暖，TA安静地趴在主人脚边。", "act": pet_name + "轻轻摇着尾巴，耳朵微微动了一下。", "say": "我在这里陪你。", "push": "和" + pet_name + "安静地待着。", "pose": "idle"},
                 {"env": "阳光透过窗户洒进来，TA在光影里安静地趴着。", "act": pet_name + "抬起头，看着主人，尾巴慢慢扫过地面。", "say": "你回来了。", "push": "和" + pet_name + "一起晒太阳。", "pose": "idle"},
                 {"env": "房间里只剩下一盏灯，暖黄的光洒在地板上。", "act": pet_name + "蜷在你脚边，身体暖暖的。", "say": "今晚也在。", "push": "和" + pet_name + "一起入睡。", "pose": "sleep"},
             ]
-            return random.choice(fallback_beats)
+            chosen = random.choice(fallback_beats)
+            logger.info(f"[beat] --- Using fallback beat (pet_id={pet_id}): env='{chosen['env'][:40]}'")
+            return chosen
 
 # ============ Pet State Routes (2D Animation) ============
 
@@ -1727,7 +1720,7 @@ def generate_journey(pet_id: int):
 
             memories_text = "\n".join([f"- {m['memory_type']}: {m['content'][:100]}" for m in memories]) if memories else "暂无记忆"
 
-            with httpx.Client(timeout=30.0) as client:
+            with httpx.Client(timeout=120.0) as client:
                 response = client.post(
                     os.getenv("base_url") + "/chat/completions",
                     headers={
@@ -1806,7 +1799,7 @@ def process_narration(pet_id: int, narration: NarrationRecordCreate):
             from dotenv import load_dotenv
             load_dotenv(override=True)
 
-            with httpx.Client(timeout=30.0) as client:
+            with httpx.Client(timeout=120.0) as client:
                 response = client.post(
                     os.getenv("base_url") + "/chat/completions",
                     headers={
@@ -1952,7 +1945,7 @@ def auto_grow_from_narration(pet_id: int, narration_text: str = Query(..., descr
             from dotenv import load_dotenv
             load_dotenv(override=True)
 
-            with httpx.Client(timeout=30.0) as client:
+            with httpx.Client(timeout=120.0) as client:
                 response = client.post(
                     os.getenv("base_url") + "/chat/completions",
                     headers={
@@ -2221,7 +2214,7 @@ def extract_pet_info(text: str = Query(..., description="用户口述的原始�
     habits = []
 
     try:
-        with httpx.Client(timeout=30.0) as client:
+        with httpx.Client(timeout=120.0) as client:
             response = client.post(
                 os.getenv("base_url") + "/chat/completions",
                 headers={
@@ -2449,7 +2442,7 @@ def _generate_default_letter(pet_id: int, letter_date: str) -> dict:
 请直接返回信件内容，不要加引号或任何格式。"""
 
         try:
-            with httpx.Client(timeout=30.0) as client:
+            with httpx.Client(timeout=120.0) as client:
                 response = client.post(
                     os.getenv("base_url") + "/chat/completions",
                     headers={
@@ -2523,7 +2516,7 @@ def _generate_letter_content(pet_name: str, traits: list, fixed_actions: list,
 请直接返回信件内容，不要加引号或任何格式。"""
 
     try:
-        with httpx.Client(timeout=30.0) as client:
+        with httpx.Client(timeout=120.0) as client:
             response = client.post(
                 os.getenv("base_url") + "/chat/completions",
                 headers={
@@ -2605,7 +2598,7 @@ def _generate_personalized_letter(pet_id: int, letter_date: str, current_chat_co
 请直接返回信件内容，不要加引号或任何格式。"""
 
         try:
-            with httpx.Client(timeout=30.0) as client:
+            with httpx.Client(timeout=120.0) as client:
                 response = client.post(
                     os.getenv("base_url") + "/chat/completions",
                     headers={
@@ -2731,7 +2724,7 @@ def generate_daily_letter(pet_id: int, request: GenerateLetterRequest = None):
 请直接返回信件内容，不要加引号或任何格式。"""
 
         try:
-            with httpx.Client(timeout=30.0) as client:
+            with httpx.Client(timeout=120.0) as client:
                 response = client.post(
                     os.getenv("base_url") + "/chat/completions",
                     headers={

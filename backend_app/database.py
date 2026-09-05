@@ -138,10 +138,16 @@ def init_db():
                 pet_id INTEGER NOT NULL,
                 role TEXT NOT NULL,               -- 'user' or 'pet'
                 content TEXT NOT NULL,
+                act TEXT,                        -- LLM生成的动作描述（仅pet消息有值）
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (pet_id) REFERENCES pets(id) ON DELETE CASCADE
             )
         """)
+        # 已有数据库可能没有 act 列，迁移添加
+        try:
+            cursor.execute("ALTER TABLE chat_messages ADD COLUMN act TEXT")
+        except Exception:
+            pass  # 列已存在时忽略
 
         # Pet animation state and position (for 2D world)
         cursor.execute("""

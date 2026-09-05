@@ -206,6 +206,7 @@ class ChatMessageResponse(BaseModel):
     pet_id: int
     role: str
     content: str
+    act: Optional[str] = None   # LLM生成的动作描述，如为空则前端使用默认动作
     created_at: datetime
 
     class Config:

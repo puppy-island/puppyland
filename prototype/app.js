@@ -450,9 +450,10 @@
     if (!S.backendPetId) return null;
     try {
       var reply = await apiRequest('/pets/' + S.backendPetId + '/chat', {
-        method: 'POST', body: JSON.stringify({ message: text }), timeout: 12000
+        method: 'POST', body: JSON.stringify({ message: text }), timeout: 120000
       });
-      return reply && reply.content ? reply.content : null;
+      // reply = { id, pet_id, role, content, act, created_at }
+      return reply && reply.content ? reply : null;
     } catch (e) { return null; }
   }
 
@@ -464,7 +465,7 @@
       var beat = await apiRequest('/pets/' + S.backendPetId + '/generate-beat', {
         method: 'POST',
         body: JSON.stringify({ previous_beat: S.story.lastEnv || null }),
-        timeout: 12000
+        timeout: 120000
       });
       if (!beat || !beat.env || !beat.act || !beat.say) return null;
       if (!ALLOWED_POSE[beat.pose]) beat.pose = 'idle';
@@ -2015,9 +2016,11 @@
     var b3 = document.createElement('div'); b3.className = 'beat'; thread.appendChild(b3);
     var remoteReply = await backendChat(text);
     if (remoteReply) {
-      b3.appendChild(line('line-act', N() + '看着你，耳朵轻轻动了一下。'));
+      // 优先使用 LLM 返回的动作（act），否则用前端默认动作
+      var actText = remoteReply.act ? remoteReply.act : '看着你，耳朵轻轻动了一下。';
+      b3.appendChild(line('line-act', N() + actText));
       await sleep(500);
-      b3.appendChild(line('line-say', remoteReply));
+      b3.appendChild(line('line-say', remoteReply.content));
       if (follow) scrollEnd(true);
       busy = false; save();
       return;
@@ -2046,14 +2049,55 @@
     if (thread.dataset.ready) return;
     thread.dataset.ready = '1';
 
-    if (!thread.childElementCount) {
-      var open = document.createElement('p');
-      open.className = 'line line-soft';
-      open.textContent = S.petName ? '门开着，灯是亮的。' : '门开着，灯是亮的。名字还没有说出口也没关系。';
-      thread.appendChild(open);
-      setTimeout(function () { playBeat(nextBeat()); }, 900);   // 首次自动开场
-    }
+    loadChatHistory();
     requestAnimationFrame(function () { thread.scrollTop = thread.scrollHeight; });
+  }
+
+  // 从后端加载聊天历史并渲染到 thread
+  async function loadChatHistory() {
+    if (!S.backendPetId) return;
+    if (thread.childElementCount > 0) return;  // 已有内容不重复加载
+    try {
+      var history = await apiRequest('/pets/' + S.backendPetId + '/chat', { timeout: 10000 });
+      if (!history || !history.length) {
+        // 无历史，显示开场白
+        var open = document.createElement('p');
+        open.className = 'line line-soft';
+        open.textContent = S.petName ? '门开着，灯是亮的。' : '门开着，灯是亮的。名字还没有说出口也没关系。';
+        thread.appendChild(open);
+        setTimeout(function () { if (!busy) playBeat(nextBeat()); }, 900);
+        return;
+      }
+      // 按时间正序渲染每条消息
+      history.forEach(function (msg) {
+        if (msg.role === 'user') {
+          // 用户消息：右对齐气泡
+          var div = document.createElement('div');
+          div.className = 'beat';
+          div.appendChild(line('line-me', msg.content));
+          thread.appendChild(div);
+        } else if (msg.role === 'pet') {
+          // 宠物消息：左对齐气泡，动作用后端返回的 act（无则用默认）
+          var div = document.createElement('div');
+          div.className = 'beat';
+          var actText = msg.act ? msg.act : '看着你，耳朵轻轻动了一下。';
+          div.appendChild(line('line-act', N() + actText));
+          div.appendChild(line('line-say', msg.content));
+          thread.appendChild(div);
+        }
+      });
+      thread.scrollTop = thread.scrollHeight;
+    } catch (e) {
+      console.warn('[loadChatHistory] failed:', e);
+      // 加载失败也显示开场白
+      if (!thread.childElementCount) {
+        var open = document.createElement('p');
+        open.className = 'line line-soft';
+        open.textContent = S.petName ? '门开着，灯是亮的。' : '门开着，灯是亮的。名字还没有说出口也没关系。';
+        thread.appendChild(open);
+        setTimeout(function () { if (!busy) playBeat(nextBeat()); }, 900);
+      }
+    }
   }
 
   $('#composer').addEventListener('submit', function (e) {
