@@ -212,6 +212,20 @@ class ChatMessageResponse(BaseModel):
     class Config:
         from_attributes = True
 
+class CorrectionRequest(BaseModel):
+    original_behavior: str       # 宠物原本的行为描述（从纠正文本中提取）
+    correction_text: str        # 主人纠正的内容
+
+class CorrectionResponse(BaseModel):
+    id: int
+    pet_id: int
+    original_behavior: str
+    correction_text: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
 class ChatRequest(BaseModel):
     message: str
     conversation_history: Optional[List[ChatMessageResponse]] = None

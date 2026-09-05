@@ -262,6 +262,22 @@ def init_db():
             )
         """)
 
+        # 纠正记录表 - 存储主人对宠物行为的纠正
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS corrections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                pet_id INTEGER NOT NULL,
+                original_behavior TEXT NOT NULL,
+                correction_text TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (pet_id) REFERENCES pets(id) ON DELETE CASCADE
+            )
+        """)
+        try:
+            cursor.execute("ALTER TABLE corrections ADD COLUMN is_active INTEGER DEFAULT 1")
+        except Exception:
+            pass  # 列已存在
+
         # Inferred Traits 表 - 存储从行为中推断的性格倾向
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS inferred_traits (

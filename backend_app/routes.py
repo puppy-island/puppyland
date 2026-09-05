@@ -29,6 +29,7 @@ from backend_app.schemas import (
     FullPetProfileResponse,
     PetEmotionalProfileCreate, PetEmotionalProfileResponse,
     ChatMessageCreate, ChatMessageResponse, ChatRequest,
+    CorrectionRequest, CorrectionResponse,
     GenerateBeatRequest,
     PetStateUpdate, PetStateResponse, MoveCommand, AnimationCommand,
     CustomAnimationCreate, CustomAnimationUpdate, CustomAnimationResponse,
@@ -896,6 +897,20 @@ def send_message_to_pet(pet_id: int, chat_request: ChatRequest):
         if habits:
             habits_context = "\n".join([f"- {h}" for h in habits[:3]])
 
+        # 构建纠正记录上下文
+        corrections_context = ""
+        cursor.execute("""
+            SELECT * FROM corrections WHERE pet_id = ? AND is_active = 1
+            ORDER BY created_at DESC LIMIT 10
+        """, (pet_id,))
+        corrections = [dict_from_row(row) for row in cursor.fetchall()]
+        if corrections:
+            correction_lines = []
+            for c in corrections:
+                correction_lines.append(f"- 以前{pet_name}会{c['original_behavior']}，但主人纠正说：{c['correction_text']}")
+            corrections_context = "\n".join(correction_lines)
+            logger.debug(f"[chat] corrections_context: {corrections_context[:100]}")
+
         # 构建记忆上下文
         memory_context = ""
         if safe_memories:
@@ -923,6 +938,7 @@ def send_message_to_pet(pet_id: int, chat_request: ChatRequest):
             owner_phrases_context=owner_phrases_context,
             habits_context=habits_context,
             memory_context=memory_context,
+            corrections_context=corrections_context,
         )
 
         # 构建对话历史
@@ -1034,6 +1050,40 @@ def get_chat_history(pet_id: int, limit: int = Query(50, ge=1, le=100)):
         messages = [dict_from_row(row) for row in cursor.fetchall()]
         messages.reverse()
         return messages
+
+@router.post("/pets/{pet_id}/corrections", response_model=CorrectionResponse, tags=["Chat"])
+def save_correction(pet_id: int, request: CorrectionRequest):
+    """
+    保存主人对宠物行为的纠正记录。
+    纠正内容会进入宠物的行为记忆，后续对话生成时会参考此信息。
+    """
+    from backend_app.schemas import CorrectionRequest, CorrectionResponse
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM pets WHERE id = ?", (pet_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Pet not found")
+        cursor.execute("""
+            INSERT INTO corrections (pet_id, original_behavior, correction_text)
+            VALUES (?, ?, ?)
+        """, (pet_id, request.original_behavior, request.correction_text))
+        correction_id = cursor.lastrowid
+        logger.info(f"[correction] saved pet_id={pet_id}: '{request.original_behavior}' <- '{request.correction_text}'")
+        cursor.execute("SELECT * FROM corrections WHERE id = ?", (correction_id,))
+        return dict_from_row(cursor.fetchone())
+
+@router.get("/pets/{pet_id}/corrections", response_model=List[CorrectionResponse], tags=["Chat"])
+def get_corrections(pet_id: int):
+    """获取宠物所有纠正记录"""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM pets WHERE id = ?", (pet_id,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Pet not found")
+        cursor.execute("""
+            SELECT * FROM corrections WHERE pet_id = ? ORDER BY created_at DESC
+        """, (pet_id,))
+        return [dict_from_row(row) for row in cursor.fetchall()]
 
 @router.post("/pets/{pet_id}/generate-beat", tags=["AI"])
 def generate_beat(pet_id: int, request: GenerateBeatRequest = None):

@@ -2006,6 +2006,26 @@
       await sleep(600);
       b2.appendChild(line('line-say', '嗯，那我记住这个。'));
       if (follow) scrollEnd(true);
+
+      // 尝试提取 original_behavior 和 correction_text
+      var correctionText = text.replace(/^(不是|不对|它不会|TA不会|他不会|她不会|没有)[，,]*/i, '');
+      var originalBehavior = correctionText
+        .replace(/^(不会|不能|没有)/i, '')
+        .replace(/^(这样|那样)/i, '');
+
+      // 调用后端 API 保存纠正记录
+      if (S.backendPetId && correctionText) {
+        apiRequest('/pets/' + S.backendPetId + '/corrections', {
+          method: 'POST',
+          body: JSON.stringify({
+            original_behavior: originalBehavior || correctionText,
+            correction_text: correctionText
+          })
+        }).catch(function(e) {
+          console.error('[correction] failed to save:', e);
+        });
+      }
+
       S.story.threads = (S.story.threads || []).concat([{ type: 'correction', rawText: text, confirmed: false }]);
       save(); busy = false;
       return;
@@ -2044,7 +2064,7 @@
     setDetail(1);                          // 进入家园后以清晰的 Base 形象陪伴
     $('#cName').textContent = S.petName ? S.petName + '的家' : '家';
     $('#cSub').textContent = S.story.mood;
-    $('.pet', petC).src = POSE[S.story.petState] || POSE.idle;
+    setPose(S.story.petState || 'idle');
 
     if (thread.dataset.ready) return;
     thread.dataset.ready = '1';

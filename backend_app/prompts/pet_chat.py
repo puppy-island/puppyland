@@ -32,6 +32,9 @@ SYSTEM_PROMPT_TEMPLATE = """【重要 - 返回格式】你必须且只能返回�
 【这个家的记忆】（这些是主人和你真实发生过的事，用于约束你的行为和语气）
 {memory_context}
 
+【行为纠正记录】（这些是主人曾经纠正过你的行为，你必须记住并在回复中避免重复）
+{corrections_context}
+
 【叙事规则】
 1. 你是此刻陪伴主人的小狗，用第一人称"我"
 2. act = 一个简单的动作描述（40字以内），从以下动作池选择，不要每次都用摇尾巴：
@@ -77,9 +80,11 @@ def build_system_prompt(
     owner_phrases_context: str,
     habits_context: str,
     memory_context: str,
+    corrections_context: str = "",
 ) -> str:
     """
     填充对话 System Prompt 模板。
+    corrections_context: 格式为多行 "- 纠正前行为 → 纠正内容"，来自 corrections 表
     """
     return SYSTEM_PROMPT_TEMPLATE.format(
         pet_name=pet_name,
@@ -89,6 +94,7 @@ def build_system_prompt(
         owner_phrases_context=owner_phrases_context or "- 暂无记录",
         habits_context=habits_context or "- 暂无习惯记录",
         memory_context=memory_context or "- 暂无具体记忆，但主人一直想念你",
+        corrections_context=corrections_context or "- 从未被纠正过",
         likes=likes or "陪伴主人",
         fears=fears or "离开主人",
     )
